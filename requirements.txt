@@ -1,5 +1,5 @@
 pyTelegramBotAPI>=4.14
 requests>=2.31
 Flask>=3.0
-groq>=0.9
+groq>=1.7.0
 google-genai>=2.31.0
