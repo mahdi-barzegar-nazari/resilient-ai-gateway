@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+tests/
+README*.md
+docs/
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+.editorconfig
+.gitattributes

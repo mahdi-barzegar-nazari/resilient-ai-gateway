@@ -1,0 +1,6 @@
+# Normalise line endings; the Dockerfile and shell snippets must stay LF.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.woff2 binary

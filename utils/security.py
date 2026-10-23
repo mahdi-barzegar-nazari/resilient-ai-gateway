@@ -1,0 +1,44 @@
+"""Access control and secret hygiene."""
+import config
+
+
+def is_authorized(user_id):
+    """Telegram: an empty allow-list means the bot is open to everyone."""
+    if not config.ALLOWED_USERS:
+        return True
+    return user_id in config.ALLOWED_USERS
+
+
+def is_authorized_bale(user_id, chat_id):
+    """Bale: a message is accepted if either the sender or the chat is allow-listed."""
+    if not config.ALLOWED_USERS:
+        return True
+    return user_id in config.ALLOWED_USERS or chat_id in config.ALLOWED_USERS
+
+
+def _secrets():
+    return (
+        config.TELEGRAM_BOT_TOKEN,
+        config.BALE_BOT_TOKEN,
+        config.GROQ_API_KEY,
+        config.GEMINI_API_KEY,
+        config.TAVILY_API_KEY,
+    )
+
+
+def redact_secrets(value):
+    """Replace API keys and bot tokens with '***'.
+
+    Needed because file-download URLs (and therefore many exception messages) embed
+    the bot token.
+    """
+    text = str(value)
+    for secret in _secrets():
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
+def short_err(error):
+    """Compact, redacted one-line description of an exception: 'TypeName: message[:200]'."""
+    return redact_secrets(f"{type(error).__name__}: {str(error)[:200]}")

@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320" role="img" aria-labelledby="t d">
+  <title id="t">Resilient Multimodal AI Gateway</title>
+  <desc id="d">Telegram and Bale users reach one gateway, which routes requests to Groq or Gemini and fails over between them automatically.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a1b26"/>
+      <stop offset="1" stop-color="#24283b"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7aa2f7"/>
+    </marker>
+    <marker id="arrow-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#e0af68"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="320" rx="16" fill="url(#bg)"/>
+  <rect x="0" y="0" width="8" height="320" rx="4" fill="#7aa2f7"/>
+
+  <g font-family="'Segoe UI', -apple-system, 'Helvetica Neue', Arial, sans-serif">
+    <!-- Title block -->
+    <text x="64" y="112" font-size="48" font-weight="700" fill="#c0caf5">Resilient Multimodal</text>
+    <text x="64" y="170" font-size="48" font-weight="700" fill="#c0caf5">AI Gateway</text>
+    <text x="64" y="218" font-size="22" fill="#7aa2f7">Telegram + Bale · automatic provider failover</text>
+    <text x="64" y="252" font-size="18" fill="#a9b1d6">Voice · image · PDF · link understanding · student toolbox</text>
+
+    <!-- Boxes -->
+    <g font-size="18" font-weight="600" text-anchor="middle">
+      <rect x="700" y="88" width="132" height="48" rx="10" fill="#1f2335" stroke="#3b4261" stroke-width="2"/>
+      <text x="766" y="119" fill="#c0caf5">Telegram</text>
+      <rect x="700" y="184" width="132" height="48" rx="10" fill="#1f2335" stroke="#3b4261" stroke-width="2"/>
+      <text x="766" y="215" fill="#c0caf5">Bale</text>
+
+      <rect x="896" y="128" width="128" height="64" rx="12" fill="#2a2f4a" stroke="#bb9af7" stroke-width="2.5"/>
+      <text x="960" y="167" fill="#bb9af7" font-size="20">Gateway</text>
+
+      <rect x="1088" y="88" width="128" height="48" rx="10" fill="#1f2335" stroke="#9ece6a" stroke-width="2"/>
+      <text x="1152" y="119" fill="#9ece6a">Groq</text>
+      <rect x="1088" y="184" width="128" height="48" rx="10" fill="#1f2335" stroke="#9ece6a" stroke-width="2"/>
+      <text x="1152" y="215" fill="#9ece6a">Gemini</text>
+    </g>
+
+    <!-- Messengers -> gateway -> providers -->
+    <g stroke="#7aa2f7" stroke-width="2.5" fill="none" marker-end="url(#arrow)">
+      <path d="M832 112 L856 112 Q880 112 880 136 L880 144 Q880 160 896 160"/>
+      <path d="M832 208 L856 208 Q880 208 880 184 L880 176 Q880 160 896 160"/>
+      <path d="M1024 160 Q1056 160 1056 136 Q1056 112 1088 112"/>
+      <path d="M1024 160 Q1056 160 1056 184 Q1056 208 1088 208"/>
+    </g>
+
+    <!-- Failover between providers -->
+    <path d="M1152 142 L1152 178" stroke="#e0af68" stroke-width="2.5" stroke-dasharray="4 4" fill="none"
+          marker-start="url(#arrow-warn)" marker-end="url(#arrow-warn)"/>
+    <text x="1164" y="165" font-size="14" fill="#e0af68">failover</text>
+  </g>
+</svg>

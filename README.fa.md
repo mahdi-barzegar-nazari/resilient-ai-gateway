@@ -1,0 +1,308 @@
+<div align="center">
+
+<img src="./docs/assets/banner.svg" alt="Resilient Multimodal AI Gateway" width="100%"/>
+
+<br/>
+
+[![CI](https://github.com/mahdi-barzegar-nazari/resilient-ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/mahdi-barzegar-nazari/resilient-ai-gateway/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/mahdi-barzegar-nazari/resilient-ai-gateway?style=flat-square)](./LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](./requirements.txt)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED?style=flat-square&logo=docker&logoColor=white)](./Dockerfile)
+[![Platforms: Telegram · Bale](https://img.shields.io/badge/platforms-Telegram_%C2%B7_Bale-26A5E4?style=flat-square&logo=telegram&logoColor=white)](./bot)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](./CONTRIBUTING.md)
+
+**دستیار هوش مصنوعی تلگرام + بله که حتی وقتی یک سرویس‌دهنده از کار بیفتد، پاسخ‌دادن را ادامه می‌دهد.**
+سوییچ خودکار Groq ⇄ Gemini · درک ویس، عکس، PDF و لینک · جعبه‌ابزار دانشجویی
+
+**[🇬🇧 English](./README.md)** · **[یادداشت‌های معماری](./docs/architecture.md)**
+
+</div>
+
+---
+
+## نمای کلی
+
+یک دستیار هوش مصنوعی **چندسکویی (تلگرام + بله)** که حتی وقتی یکی از سرویس‌دهنده‌ها از کار بیفتد، به پاسخ‌دادن ادامه می‌دهد: **سوییچ خودکار Groq ⇄ Gemini**، درک ویس، عکس، PDF و لینک، و یک جعبه‌ابزار دانشجویی (کمک به دیباگ، پل ویکی‌پدیا و ArXiv، آزمون‌ساز).
+
+معماری آن یک **دروازه‌ی مرز شبکه** است: کاربرِ پشت اینترنت داخلی با یک پیام‌رسان داخلی حرف می‌زند و سرور، که بیرون از مرز اجرا می‌شود، به‌جای او به APIها و سایت‌های بین‌المللی وصل می‌شود.
+
+کد لایه‌بندی شده است (`bot ← core ← services ← utils`)، هر رفتار فهرست‌شده در این سند با یک تست رگرسیون آفلاین ثابت نگه داشته می‌شود و کل ۲۴۸ تست در حدود یک‌دهم ثانیه و بدون هیچ کلید API اجرا می‌شود.
+
+## ویژگی‌ها
+
+- **یک مغز، دو پیام‌رسان.** تلگرام (با pyTelegramBotAPI) و بله (کلاینت پولینگ دست‌نویس) از یک پایپ‌لاین مشترک استفاده می‌کنند؛ هر اصلاح روی هر دو اعمال می‌شود.
+- **سوییچ خودکار سرویس‌دهنده.** خطای ۴۲۹، تایم‌اوت یا پاسخ خالی از Groq ⇒ همان درخواست روی Gemini تکرار می‌شود (و برعکس) و یک یادداشت کوتاه به پاسخ اضافه می‌شود.
+- **ورودی چندوجهی.** ویس (Whisper)، عکس و PDF (Gemini)، لینک (Tavily Extract).
+- **خروجی امن برای پیام‌رسان.** شکستن پیام با حفظ بلاک‌های کد، فرار کاراکترهای HTML و بازگشت به متن ساده.
+- **پیش‌فرض‌های حریم‌خصوصی.** حافظه‌ی گفتگو تا وقتی کاربر روشنش نکند **خاموش** است و کلیدها از همه‌ی لاگ‌ها حذف می‌شوند.
+- **تست بدون اینترنت.** ۲۴۸ تست واحد در حدود یک‌دهم ثانیه و بدون هیچ کلید API اجرا می‌شوند.
+
+### جدول قابلیت‌ها
+
+| قابلیت | تلگرام | بله | موتور |
+|---|:---:|:---:|---|
+| گفتگوی متنی و تعویض مدل (`/fast` `/smart` `/gemini`) | ✅ | ✅ | Groq (Qwen / GPT-OSS-120B) · Gemini |
+| سوییچ خودکار سرویس‌دهنده | ✅ | ✅ | `services/ai_router.py` |
+| ویس ← متن ← پاسخ | ✅ | ✅ | Whisper روی Groq |
+| تحلیل عکس | ✅ | ✅ | Gemini |
+| خواندن PDF، خلاصه و حل تمرین | ✅ | ✅ | Gemini (ورودی مستقیم `application/pdf`) |
+| خلاصه‌سازی لینک (فقط URL بفرستید) | ✅ | ✅ | Tavily Extract + مدل |
+| داده‌ی زنده‌ی وب برای سؤال‌های تازه | ✅ | ✅ | Tavily Search ← Google News RSS |
+| `/read` `/wiki` `/arxiv` `/arxiv_full` | ✅ | ✅ | Tavily · API ویکی‌پدیا · API ArXiv |
+| `/debug` (خطا ← ریشه‌ی باگ ← کد اصلاح‌شده) | ✅ | ✅ | پرامپت اختصاصی + خروجی بلند |
+| `/quiz` آزمون چهارگزینه‌ای با سختی تطبیقی | ✅ دکمه یا تایپ | ✅ تایپ | مدل با قرارداد JSON سخت‌گیرانه |
+| حالت آزمون (خروجی تک‌سطری پاسخ‌نامه) | ✅ | ✅ | پرامپت اختصاصی + دمای پایین |
+| پنل دکمه‌ای (Inline Keyboard) | ✅ | — | فقط تلگرام |
+| محدودیت دسترسی با فهرست مجاز | ✅ | ✅ | `ALLOWED_USERS` |
+
+## شروع سریع
+
+### اجرای محلی
+
+```bash
+git clone https://github.com/mahdi-barzegar-nazari/resilient-ai-gateway.git
+cd resilient-ai-gateway
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env        # کلیدها را پر کنید؛ .env توسط git نادیده گرفته می‌شود
+set -a && source .env && set +a
+python main.py
+```
+
+حداقل به یک توکن بات (`TELEGRAM_BOT_TOKEN` از @BotFather یا `BALE_BOT_TOKEN` از BotFather بله) و یک کلید هوش مصنوعی
+(`GROQ_API_KEY` و/یا `GEMINI_API_KEY`) نیاز دارید. برای فعال شدن سوییچ خودکار هر دو کلید را بگذارید.
+
+### تنظیمات
+
+| متغیر | الزامی | کاربرد |
+|---|:---:|---|
+| `TELEGRAM_BOT_TOKEN` / `BALE_BOT_TOKEN` | یکی از دو | اعتبارنامه‌ی بات. اگر فقط یکی تنظیم شود فقط همان پلتفرم اجرا می‌شود. |
+| `GROQ_API_KEY` | یکی از دو کلید AI | مدل‌های متنی و Whisper |
+| `GEMINI_API_KEY` | یکی از دو کلید AI | مدل جایگزین، **عکس و PDF** |
+| `TAVILY_API_KEY` | اختیاری | جستجوی وب، خلاصه‌ی لینک، `/read` |
+| `ALLOWED_USERS` | توصیه‌شده | شناسه‌های عددی با کاما؛ خالی = همه می‌توانند استفاده کنند |
+| `MODEL_FAST` `MODEL_SMART` `MODEL_GEMINI` `MODEL_WHISPER` | اختیاری | جایگزینی نام مدل‌های پیش‌فرض |
+| `WHISPER_LANGUAGE` | اختیاری | پیش‌فرض `fa`؛ رشته‌ی خالی = تشخیص خودکار |
+| `PORT` | اختیاری | پورت سرور سلامت (پیش‌فرض ۸۰۸۰) |
+
+### استقرار
+
+- **Render:** فایل `render.yaml` یک Blueprint است (سرویس وب رایگان با مسیر سلامت `/healthz`). کلیدها را در داشبورد وارد کنید.
+  نمونه‌های رایگان در بیکاری می‌خوابند؛ با یک مانیتور آپتایم به `/` پینگ بزنید.
+- **Docker:** `docker build -t resilient-ai-gateway . && docker run --env-file .env -p 8080:8080 resilient-ai-gateway`
+
+### توسعه و تست
+
+```bash
+python -m unittest discover -s tests -t . -v      # pytest هم کار می‌کند
+```
+
+مجموعه‌ی تست **نه اینترنت می‌خواهد و نه کلید API**. SDKها فقط وقتی نصب نباشند با stub جایگزین می‌شوند (`tests/stubs.py`) و هر متدِ شبکه‌ایِ stub خطا می‌دهد؛
+پس تستی که فراخوانی شبکه را mock نکند، به‌جای معلق ماندن، صریحاً شکست می‌خورد. CI تست‌ها را روی Python 3.10 تا 3.12 اجرا می‌کند.
+
+## معماری
+
+```text
+.
+├── main.py                    # entry point: threads + wiring
+├── config.py                  # environment, model names, limits
+├── bot/
+│   ├── telegram_handler.py    # TelegramApp: handlers, inline keyboards, rendering
+│   ├── bale_handler.py        # BaleApp: polling client, media, routing
+│   └── messages.py            # user-facing texts
+├── core/
+│   ├── session.py             # Session + SessionStore (per platform and chat)
+│   ├── pipeline.py            # run_chat: links → router → memory
+│   ├── prompts.py             # system prompts, failover notes
+│   └── errors.py
+├── services/
+│   ├── ai_router.py           # Groq ⇄ Gemini routing and failover
+│   ├── clients.py             # SDK clients (incl. long-timeout PDF client)
+│   ├── web_service.py         # search context, link extraction, /read
+│   ├── audio_service.py       # Whisper transcription
+│   ├── media_service.py       # image and PDF prompts/metadata
+│   ├── knowledge_service.py   # Wikipedia and ArXiv
+│   ├── quiz_service.py        # JSON-contract quiz engine
+│   ├── tools.py               # /debug and the tool registry
+│   └── health_server.py       # tiny Flask health endpoint
+├── utils/
+│   ├── formatters.py          # chunking, HTML conversion, truncation
+│   ├── security.py            # allow-list, secret redaction
+│   └── log.py                 # redacting log formatter
+├── tests/                     # 248 offline unit tests
+├── docs/                      # architecture notes, banner
+├── Dockerfile · render.yaml · .env.example
+├── .github/                   # CI workflow, Dependabot
+└── README.md · README.fa.md · CHANGELOG.md · CONTRIBUTING.md · SECURITY.md · LICENSE
+```
+
+```mermaid
+flowchart TD
+    TGU["Telegram user"] -->|"update (long polling)"| TG["TelegramApp"]
+    BLU["Bale user"] -->|"getUpdates (own polling loop)"| BL["BaleApp"]
+
+    TG --> AUTH["Allow-list check"]
+    BL --> AUTH
+    AUTH --> ROUTE{"Message type"}
+
+    ROUTE -->|"voice"| STT["audio_service<br/>Whisper via Groq"]
+    ROUTE -->|"image or PDF"| MEDIA["media_service<br/>multimodal input"]
+    ROUTE -->|"command"| TOOLS["tools, quiz, settings"]
+    ROUTE -->|"text"| PIPE["core.pipeline.run_chat"]
+    STT --> PIPE
+    MEDIA --> PIPE
+
+    PIPE --> LINK{"Contains a link?"}
+    LINK -->|"yes"| EXTRACT["web_service<br/>Tavily Extract, bounded"]
+    LINK -->|"no"| ROUTER["ai_router.process_ai_query"]
+    EXTRACT --> ROUTER
+    TOOLS --> ROUTER
+
+    ROUTER -->|"primary"| P1["Groq"]
+    ROUTER -->|"primary or failover"| P2["Gemini"]
+    P1 -. "429, timeout, empty" .-> P2
+    P2 -. "error" .-> P1
+
+    ROUTER --> OUT["formatters<br/>escape and fence-aware chunking"]
+    OUT --> TG
+    OUT --> BL
+```
+
+### لایه‌ها و قاعده‌ی وابستگی
+
+| لایه | پکیج | مسئولیت |
+|---|---|---|
+| آداپتورها | `bot/` | دریافت پیام، بررسی دسترسی، دانلود رسانه، نمایش پاسخ (HTML، تکه‌ها، دکمه‌ها). **بدون منطق تصمیم‌گیری.** |
+| هسته | `core/` | نشست (`Session`) هر `(پلتفرم، چت)`، پایپ‌لاین مشترک `run_chat`، پرامپت‌های سیستمی. |
+| سرویس‌ها | `services/` | روتر هوش مصنوعی، جستجو و استخراج لینک، صوت، ویکی‌پدیا/ArXiv، آزمون، ابزارها. **هرگز آداپتورها را import نمی‌کنند.** |
+| ابزارهای کمکی | `utils/` | توابع خالص: شکستن پیام، تبدیل HTML، حذف کلیدها، احراز هویت، لاگ. |
+| تنظیمات | `config.py` | متغیرهای محیطی، نام مدل‌ها و سقف‌ها. به‌صورت `config.X` در زمان فراخوانی خوانده می‌شود تا تست بتواند مقدار را عوض کند. |
+
+وابستگی‌ها یک‌طرفه‌اند: `bot ← core ← services ← utils / config`. تنها یال برگشتی این است که سرویس‌ها `core.prompts` و `core.errors` را import می‌کنند؛ این دو ماژولِ برگی هیچ چیزی از پروژه import نمی‌کنند، پس چرخه‌ی import وجود ندارد.
+
+### مسیر یک پیام
+
+1. آداپتور (`bot/`) پیام را می‌گیرد و **فهرست مجاز** را بررسی می‌کند.
+2. ویس به متن تبدیل می‌شود؛ عکس و PDF به ورودی چندوجهی؛ دستورها به ابزارها.
+3. `core.pipeline.run_chat` لینک‌ها را استخراج و خلاصه‌سازی می‌کند (در حالت آزمون و برای رسانه نه).
+4. `ai_router` درخواست را به سرویس‌دهنده‌ی انتخابی می‌فرستد و در صورت خطا روی دیگری تکرار می‌کند.
+5. خروجی فرار داده می‌شود، روی مرز خط و با حفظ بلاک‌های کد تکه‌تکه می‌شود و ارسال می‌گردد.
+
+نمودار توالی سوییچ، مدل threadها و راهنمای توسعه‌ی پروژه در [`docs/architecture.md`](./docs/architecture.md) آمده است (انگلیسی).
+
+## چالش‌های مهندسی حل‌شده
+
+**۱. قطعی سرویس‌دهنده نباید برای کاربر دیده شود.**
+`process_ai_query` اول سرویس‌دهنده‌ی انتخابی را امتحان می‌کند و روی هر خطا (حتی پاسخ *خالی*) همان درخواست را روی دیگری تکرار می‌کند.
+اگر کلید Gemini وجود داشته باشد، کلاینت Groq با `max_retries=0` ساخته می‌شود تا سوییچ بی‌درنگ انجام شود. در حالت آزمون یادداشت سوییچ حذف می‌شود
+چون سطر پاسخ‌نامه باید ماشین‌خوان بماند. اگر هر دو خطا بدهند، پیام خطا علت هر دو را نشان می‌دهد.
+← `services/ai_router.py` · `tests/test_ai_router.py`
+
+**۲. شکستن پاسخ‌های بلند بدون خراب شدن بلاک‌های کد.**
+تلگرام و بله پیام را به ۴۰۹۶ کاراکتر محدود می‌کنند. `split_message` روی مرز خط می‌شکند و وضعیت «داخل بلاک ``` هستیم یا نه» را نگه می‌دارد؛
+اگر تکه‌ای وسط بلاک تمام شود، همان‌جا بسته و در تکه‌ی بعدی دوباره باز می‌شود تا رنگ‌بندی سینتکس نشکند. خطوط بسیار بلند هم شکسته می‌شوند.
+← `utils/formatters.py` · `tests/test_formatters.py`
+
+**۳. خروجی مدل نباید پارسر پیام را از کار بیندازد.**
+خروجی قبل از تبدیل Markdown سبک به HTML تلگرام، فرار داده می‌شود و کدها اول کنار گذاشته می‌شوند تا `**kwargs` داخل کد پررنگ نشود.
+اگر تلگرام باز هم تکه‌ای را نپذیرفت، به‌جای گم شدن، به‌صورت متن ساده دوباره ارسال می‌شود. دکمه‌ها فقط به آخرین تکه چسبانده می‌شوند.
+← `utils/formatters.py` · `bot/telegram_handler.py::reply`
+
+**۴. کلیدها هرگز به لاگ یا چت نشت نمی‌کنند.**
+آدرس دانلود فایل شامل توکن بات است و پیام خطاهای معمولی آن را لو می‌دهند. هر خطای قابل‌نمایش از `redact_secrets` می‌گذرد و فرمتر لاگ
+*خط نهایی* را — از جمله traceback — پاک‌سازی می‌کند.
+← `utils/security.py`، `utils/log.py` · `tests/test_security.py`
+
+**۵. ویس ۳ ثانیه‌ای «بیشتر از ۵ دقیقه» تشخیص داده می‌شد.**
+بله مدت رسانه را به **میلی‌ثانیه** می‌دهد و تلگرام به ثانیه؛ مقایسه‌ی `3000` با سقف `300` پیام‌های کوتاه را رد می‌کرد.
+حالا آداپتور واحد را یکسان می‌کند (`bale_voice_seconds`) و یک تست رگرسیون مرز را ثابت نگه می‌دارد (دقیقاً ۵ دقیقه پذیرفته، یک میلی‌ثانیه بیشتر رد).
+← `bot/bale_handler.py` · `tests/test_bale_handler.py::VoiceDurationTests`
+
+**۶. خلاصه‌سازی لینک با سقف توکن و بدون تزریق پرامپت.**
+محتوای لینک با Tavily Extract گرفته می‌شود، نویز مارک‌داون و آدرس‌های خام حذف می‌شود و متن روی مرز جمله به `LINK_MAX_CHARS` محدود می‌گردد
+(حداکثر دو لینک). پرامپت صریحاً می‌گوید متن صفحه «داده» است نه «دستور». متن بلند چسبانده‌شده‌ای که فقط یک لینک دارد، درخواست لینک حساب نمی‌شود
+و در حافظه یک یادداشت کوتاه ذخیره می‌شود نه کل صفحه.
+← `services/web_service.py::prepare_link_prompt` · `tests/test_web_service.py`
+
+**۷. یک پایپ‌لاین، دو پلتفرم، حالت جدا.**
+یک dataclass به نام `Session` برای هر `(پلتفرم، chat_id)` جای ده‌ها دیکشنری موازی را گرفته؛ پس یک chat_id یکسان در تلگرام و بله هرگز تداخل نمی‌کند.
+`core.pipeline.run_chat` مسئول لینک، مسیریابی و قاعده‌ی حافظه است («فقط وقتی حافظه روشن و حالت آزمون خاموش است») و یک *کپی* از تاریخچه به روتر می‌دهد.
+← `core/session.py`، `core/pipeline.py`
+
+**۸. آزمون‌ساز قابل‌اعتماد با قرارداد JSON.**
+مدل باید یک JSON سخت‌گیرانه برگرداند. پاسخ از بلاک‌های `<think>` و کد پاک می‌شود، اعتبارسنجی می‌شود (چهار گزینه، پاسخ A تا D، توضیح) و یک بار تکرار می‌شود.
+هر سؤال شناسه دارد؛ پس دکمه‌ی قدیمیِ سؤال قبلی هیچ‌وقت روی سؤال جدید نمره نمی‌گیرد و تصحیح زیر قفل و اتمیک است، یعنی دوبار لمس دو بار امتیاز نمی‌دهد.
+سختی با امتیاز لحظه‌ای تنظیم می‌شود و سؤال‌های اخیر برای جلوگیری از تکرار به مدل داده می‌شوند.
+← `services/quiz_service.py` · `tests/test_quiz_and_tools.py`
+
+**۹. PDF سنگین است.**
+فایل به‌صورت مستقیم `application/pdf` و با یک کلاینت اختصاصی با تایم‌اوت بلندتر (۱۸۰ ثانیه در برابر ۶۰) به Gemini می‌رسد.
+سقف حجم (۱۵ مگابایت) سربار حدود ۳۳٪ی base64 را در نظر می‌گیرد، هم قبل و هم بعد از دانلود بررسی می‌شود و برای مقاله‌های ArXiv هم اعمال می‌شود.
+← `services/clients.py`، `services/media_service.py`
+
+**۱۰. حلقه‌ی پولینگی که روزهای بد را تاب می‌آورد.**
+بله SDK رسمی ندارد؛ پس `BaleApp.run` پولینگ را دستی انجام می‌دهد: offset *قبل از* پردازش آپدیت جلو می‌رود (آپدیت مسموم رد می‌شود نه اینکه برای همیشه تکرار شود)،
+خطای یک آپدیت جلوی بقیه را نمی‌گیرد، و خطای شبکه با ۲ ثانیه مکث تکرار می‌شود و به‌جای هر تلاش، فقط یک بار برای هر قطعی لاگ می‌شود.
+← `bot/bale_handler.py::poll_once/run` · `tests/test_bale_handler.py::PollingTests`
+
+**۱۱. کنترل دسترسی همه‌جا.**
+فهرست مجاز دستورها، متن آزاد، دکمه‌های شیشه‌ای، ویس، عکس و سند را پوشش می‌دهد؛ برای کاربر غیرمجاز هیچ فایلی دانلود نمی‌شود.
+به کاربر غیرمجاز در بله شناسه‌ی عددی‌اش نشان داده می‌شود تا مالک بداند چه چیزی در `ALLOWED_USERS` بگذارد.
+
+## دستورها
+
+| دستور | کار |
+|---|---|
+| `/start` `/panel` `/menu` | خوش‌آمد + پنل دکمه‌ای سریع (تلگرام) |
+| `/fast` `/smart` `/gemini` | انتخاب موتور |
+| `/memory_on` `/memory_off` `/clear` | حافظه‌ی گفتگو (پیش‌فرض: خاموش) |
+| `/exam_on` `/exam_off` | خروجی تک‌سطری پاسخ‌نامه برای آزمون زبان |
+| `/long_on` `/long_off` | خروجی بلند و کامل (فایل‌های کامل کد) |
+| `/debug <خطا یا کد>` | ریشه‌ی باگ ← راه‌حل گام‌به‌گام ← کد اصلاح‌شده ← پیشگیری |
+| `/read <لینک>` | متن تمیز کامل صفحه (پروکسی متن برای سایت‌های مسدود) |
+| `/wiki <موضوع>` | متن کامل مقاله‌ی ویکی‌پدیا (فارسی یا انگلیسی) |
+| `/arxiv <عبارت یا شناسه>` | جستجوی مقاله یا نمایش چکیده |
+| `/arxiv_full <شناسه>` | خلاصه‌ی فارسی ساختاریافته‌ی کل مقاله (Gemini فایل PDF را می‌خواند) |
+| `/quiz [موضوع]`، `/quiz_stop` | آزمون چهارگزینه‌ای و امتیاز نهایی |
+| ارسال **لینک** | خلاصه‌ی تحلیلی صفحه |
+| ارسال **PDF** (کپشن = دستور) | خلاصه، نکات کلیدی یا حل تمرین‌ها |
+| ارسال **ویس / عکس** | تبدیل به متن و پاسخ / تحلیل تصویر |
+| `/web <عبارت>`، `/testweb` | فقط تلگرام: پاسخ اجباری با داده‌ی زنده‌ی وب / مشاهده‌ی خروجی خام جستجو |
+
+## دروازه‌های کیفیت
+
+| دروازه | ابزار | کجا اجرا می‌شود |
+| :--- | :--- | :--- |
+| ۲۴۸ تست واحد آفلاین، بدون اینترنت و کلید API | `unittest` (Python 3.10 تا 3.12) | CI، محلی |
+| کامپایل بایت‌کد همه‌ی ماژول‌ها | `compileall` | CI |
+| حذف کلیدها از خطاها و لاگ‌ها | [`tests/test_security.py`](./tests/test_security.py) | CI |
+| به‌روزرسانی وابستگی‌ها و ایمیج پایه | Dependabot (pip، Docker، Actions) | هفتگی |
+
+لینت و بررسی نوع ایستا هنوز تنظیم نشده‌اند؛ بخش بعد را ببینید.
+
+## محدودیت‌ها و نقشه‌ی راه
+
+- [ ] **حالت در حافظه است.** نشست‌ها، حافظه و پیشرفت آزمون با ری‌استارت پاک می‌شوند. گام بعد: SQLite یا Redis پشت رابط `SessionStore`.
+- [ ] **آپدیت‌های بله پشت‌سرهم پردازش می‌شوند.** یک فراخوانی کند مدل، بقیه‌ی کاربران بله را عقب می‌اندازد. گام بعد: استخر کارگر برای هر چت.
+- [ ] **جستجو با heuristic کلیدواژه‌ای فعال می‌شود** (`should_search_web`). گام بعد: واگذاری تصمیم به خود مدل با tool calling.
+- [ ] **عکس و PDF فقط با Gemini** پردازش می‌شوند و جایگزین ندارند. PDF به‌صورت inline (سقف ۱۵ مگابایت) آپلود می‌شود؛ Files API این سقف را برمی‌دارد.
+- [ ] **محدودیت نرخ برای هر کاربر** هنوز وجود ندارد؛ فهرست مجاز تنها ابزار جلوگیری از سوءاستفاده است.
+- [ ] **لینت و بررسی نوع.** افزودن Ruff و یک type checker ایستا به CI.
+
+## امنیت
+
+- فایل `.env` را وارد مخزن نکنید (در `.gitignore` هست)؛ هر توکنی که یک‌بار commit شده باید عوض شود.
+- روی هر استقرار عمومی `ALLOWED_USERS` را تنظیم کنید: هر پیام از سهمیه‌ی سرویس‌دهنده مصرف می‌کند.
+- متن صفحه‌های لینک‌شده در پرامپت «داده‌ی نامعتبر» حساب می‌شود، اما باز هم ورودی مدل است؛ بدون سخت‌سازی بیشتر، ابزاری که روی دنیای بیرون اثر می‌گذارد به این بات اضافه نکنید.
+- آسیب‌پذیری‌ها را طبق [`SECURITY.md`](./SECURITY.md) و به‌صورت خصوصی گزارش دهید.
+
+## مشارکت
+
+گزارش باگ و pull request خوش‌آمد است. برای راه‌اندازی، قوانین تست و چک‌لیست، [`CONTRIBUTING.md`](./CONTRIBUTING.md) را بخوانید.
+
+## مجوز
+
+تحت [مجوز MIT](./LICENSE) منتشر شده است.
+
+نگهدارنده: [Mahdi Barzegar Nazari](https://github.com/mahdi-barzegar-nazari).
