@@ -1,4 +1,4 @@
-pyTelegramBotAPI>=4.14
+pyTelegramBotAPI>=4.37.1
 requests>=2.31
 Flask>=3.0
 groq>=0.9
