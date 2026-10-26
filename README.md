@@ -26,7 +26,7 @@ A cross-platform **Telegram + Bale** AI assistant that keeps answering when a pr
 
 It is designed as a **network-boundary gateway**: users on a restricted national network talk to a domestic messenger, and this server, running outside, talks to the international AI APIs and websites on their behalf.
 
-The codebase is layered (`bot → core → services → utils`), every behaviour listed below is pinned by an offline regression test, and the whole suite of 248 tests runs in about a tenth of a second with no API keys.
+The codebase is layered (`bot → core → services → utils`), every behaviour listed below is pinned by an offline regression test, and the whole suite of 363 tests runs in well under a second with no API keys.
 
 ## Features
 
@@ -34,10 +34,13 @@ The codebase is layered (`bot → core → services → utils`), every behaviour
   single platform-agnostic pipeline, so a fix or feature lands on both at once.
 - **Provider failover.** Groq rate-limit (429), timeout or empty answer → the same request is replayed on
   Gemini (and vice versa), with a short note appended to the answer.
+- **Several API keys per provider.** `GROQ_API_KEYS`, `GEMINI_API_KEYS` and `TAVILY_API_KEYS` take comma-separated
+  keys; requests rotate round-robin, and a key that is rate limited, times out or fails is skipped for a while.
+  One key behaves exactly as before.
 - **Multimodal input.** Voice notes (Whisper), images and PDFs (Gemini), links (Tavily Extract).
 - **Message-safe output.** Code-fence-aware chunking, HTML escaping with plain-text fallback.
 - **Privacy-first defaults.** Conversation memory is **off** until the user opts in; secrets are redacted from every log line.
-- **Tested without the network.** 248 unit tests run in about a tenth of a second, with no API keys.
+- **Tested without the network.** 363 unit tests run in well under a second, with no API keys.
 
 ### Capabilities
 
@@ -74,6 +77,7 @@ python main.py
 
 You need at least one bot token (`TELEGRAM_BOT_TOKEN` from @BotFather, or `BALE_BOT_TOKEN` from Bale's BotFather)
 and at least one AI key (`GROQ_API_KEY` and/or `GEMINI_API_KEY`). Configure both AI keys to enable failover.
+Each provider also accepts several keys (`GROQ_API_KEYS`, `GEMINI_API_KEYS`, `TAVILY_API_KEYS`); see the table below.
 
 ### Configuration
 
@@ -83,6 +87,9 @@ and at least one AI key (`GROQ_API_KEY` and/or `GEMINI_API_KEY`). Configure both
 | `GROQ_API_KEY` | one of the AI keys | Text models and Whisper |
 | `GEMINI_API_KEY` | one of the AI keys | Fallback text, **images, PDFs** |
 | `TAVILY_API_KEY` | optional | Web search, link summaries, `/read` |
+| `GROQ_API_KEYS` `GEMINI_API_KEYS` `TAVILY_API_KEYS` | optional | Extra keys, comma-separated, merged with the singular variables above (spaces and empty items are ignored, duplicates removed). With two or more keys per provider, requests rotate round-robin. |
+| `KEY_MAX_ATTEMPTS` `KEY_RETRY_BUDGET_SECONDS` | optional | Rotation bounds: keys tried per request (default 3) and the time after which no further key is tried (default 90 s) |
+| `KEY_COOLDOWN_RATE_LIMIT` `KEY_COOLDOWN_RATE_LIMIT_MAX` `KEY_COOLDOWN_TRANSIENT` `KEY_COOLDOWN_AUTH` | optional | Seconds a key is skipped after: a 429 without `Retry-After` (60), the cap for `Retry-After` (300), a timeout, connection error or 5xx (15), a 401/403 (3600) |
 | `ALLOWED_USERS` | recommended | Comma-separated numeric ids; empty = open to everyone |
 | `MODEL_FAST` `MODEL_SMART` `MODEL_GEMINI` `MODEL_WHISPER` | optional | Override the default model names |
 | `WHISPER_LANGUAGE` | optional | Default `fa`; empty string = auto-detect |
@@ -122,6 +129,7 @@ mock a call fails loudly instead of hanging. CI runs the suite on Python 3.10 �
 ├── services/
 │   ├── ai_router.py           # Groq ⇄ Gemini routing and failover
 │   ├── clients.py             # SDK clients (incl. long-timeout PDF client)
+│   ├── key_pool.py            # API-key rotation: round-robin, cooldowns
 │   ├── web_service.py         # search context, link extraction, /read
 │   ├── audio_service.py       # Whisper transcription
 │   ├── media_service.py       # image and PDF prompts/metadata
@@ -133,7 +141,7 @@ mock a call fails loudly instead of hanging. CI runs the suite on Python 3.10 �
 │   ├── formatters.py          # chunking, HTML conversion, truncation
 │   ├── security.py            # allow-list, secret redaction
 │   └── log.py                 # redacting log formatter
-├── tests/                     # 248 offline unit tests
+├── tests/                     # 363 offline unit tests
 ├── docs/                      # architecture notes, banner
 ├── Dockerfile · render.yaml · .env.example
 ├── .github/                   # CI workflow, Dependabot
@@ -178,7 +186,7 @@ flowchart TD
 |---|---|---|
 | Adapters | `bot/` | Receive updates, enforce the allow-list, download media, render replies (HTML, chunks, keyboards). **No decision logic.** |
 | Core | `core/` | `Session` state per `(platform, chat)`, the shared `run_chat` pipeline, system prompts. |
-| Services | `services/` | AI router, web search & link extraction, audio, media prompts, Wikipedia/ArXiv, quiz, tools. **Never import adapters.** |
+| Services | `services/` | AI router, API-key rotation, web search & link extraction, audio, media prompts, Wikipedia/ArXiv, quiz, tools. **Never import adapters.** |
 | Utils | `utils/` | Pure helpers: chunking, HTML conversion, redaction, authorization, logging. |
 | Config | `config.py` | Environment variables, model names, limits. Read as `config.X` at call time so tests can override. |
 
@@ -267,6 +275,17 @@ The allow-list covers commands, free text, inline-keyboard presses, voice, photo
 downloaded for an unauthorised user. An unauthorised Bale user is shown their numeric id so the owner knows
 what to put in `ALLOWED_USERS`.
 
+**12. Several API keys per provider, rotated without waiting.**
+With two or more keys, `services/key_pool.py` hands them out round-robin and retries the *same* request on the
+next key after a 429/quota (a capped `Retry-After` is honoured), timeout, connection error, 5xx or empty answer.
+A 401/403 benches the key for an hour; a 400-class request error is never replayed, because another key cannot
+fix it. Each key is tried at most once per request, attempts are capped by `KEY_MAX_ATTEMPTS` and a time budget,
+and SDK-level retries are switched off, so the worst case stays bounded. When every key is cooling down the call
+fails immediately, so the Groq ⇄ Gemini failover (challenge 1) takes over without any waiting. A single key
+bypasses the pool and behaves exactly as before. Keys appear in logs only as provider and position, and every
+key of every list is redacted.
+→ `services/key_pool.py`, `services/clients.py` · `tests/test_key_pool.py`, `tests/test_key_rotation.py`
+
 ## Commands
 
 | Command | What it does |
@@ -291,7 +310,7 @@ what to put in `ALLOWED_USERS`.
 
 | Gate | Tool | Where it runs |
 | :--- | :--- | :--- |
-| 248 offline unit tests, no network and no API keys | `unittest` (Python 3.10 to 3.12) | CI, local |
+| 363 offline unit tests, no network and no API keys | `unittest` (Python 3.10 to 3.12) | CI, local |
 | Every module byte-compiles | `compileall` | CI |
 | Secret redaction in errors and logs | [`tests/test_security.py`](./tests/test_security.py) | CI |
 | Dependency and base-image updates | Dependabot (pip, Docker, Actions) | Weekly |
@@ -305,6 +324,7 @@ Linting and static typing are not configured yet; see the roadmap.
 - [ ] **Search is triggered by keyword heuristics** (`should_search_web`). Next step: let the model decide through tool calling.
 - [ ] **Images and PDFs are Gemini-only**, so they have no failover. PDFs are uploaded inline (15 MB cap); the Files API would lift that.
 - [ ] **No per-user rate limiting** yet; the allow-list is the only abuse control.
+- [ ] **Key cooldowns are in memory and per key, not per model.** They reset on restart, and a rate limit on one Groq model (or on Whisper) also rests the key for the others. Next step: track cooldowns per `(key, model)`, and share them between instances if the bot ever scales out.
 - [ ] **Lint and typing.** Add Ruff and a static type checker to CI.
 
 ## Security

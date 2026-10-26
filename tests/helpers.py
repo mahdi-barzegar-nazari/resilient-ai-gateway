@@ -87,3 +87,61 @@ def patch_bot(testcase, app, **results):
         p.start()
         testcase.addCleanup(p.stop)
     return recorder
+
+
+# ---------------------------------------------------------------- API key rotation helpers
+class FakeClock:
+    """Injectable clock: time only moves when a test calls ``advance``, so no test ever sleeps."""
+
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class FakeHttpError(Exception):
+    """Shaped like ``groq.APIStatusError`` / ``requests.HTTPError``: ``status_code`` and ``response.headers``."""
+
+    def __init__(self, status, headers=None, message=None):
+        super().__init__(message or f"HTTP {status}")
+        self.status_code = status
+        self.response = SimpleNamespace(status_code=status, headers=headers or {})
+
+
+class FakeGenaiError(Exception):
+    """Shaped like ``google.genai.errors.APIError``: ``code``, ``status`` (a string) and ``message``."""
+
+    def __init__(self, code, status, message=""):
+        super().__init__(f"{code} {status}. {message}")
+        self.code, self.status, self.message = code, status, message
+
+
+# Same class names as the real SDK errors: the pool recognises network failures by name, not by import.
+class APITimeoutError(Exception):
+    pass
+
+
+class APIConnectionError(Exception):
+    pass
+
+
+ROTATION_DEFAULTS = {
+    "KEY_MAX_ATTEMPTS": 3,
+    "KEY_RETRY_BUDGET_SECONDS": 90.0,
+    "KEY_COOLDOWN_RATE_LIMIT": 60.0,
+    "KEY_COOLDOWN_RATE_LIMIT_MAX": 300.0,
+    "KEY_COOLDOWN_TRANSIENT": 15.0,
+    "KEY_COOLDOWN_AUTH": 3600.0,
+}
+
+
+def pin_rotation_settings(testcase):
+    """Fix the rotation constants so a developer's environment variables cannot change test outcomes."""
+    for name, value in ROTATION_DEFAULTS.items():
+        patcher = mock.patch.object(config, name, value)
+        patcher.start()
+        testcase.addCleanup(patcher.stop)

@@ -18,5 +18,12 @@ services:
         sync: false
       - key: TAVILY_API_KEY
         sync: false
+      # Optional: comma-separated extra keys, merged with the three above (key rotation).
+      - key: GROQ_API_KEYS
+        sync: false
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: TAVILY_API_KEYS
+        sync: false
       - key: ALLOWED_USERS
         sync: false

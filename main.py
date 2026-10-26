@@ -23,8 +23,10 @@ def main():
     if not config.TELEGRAM_BOT_TOKEN and not config.BALE_BOT_TOKEN:
         log.error("Neither TELEGRAM_BOT_TOKEN nor BALE_BOT_TOKEN is set; nothing to run. See .env.example.")
         return 1
-    if not config.GROQ_API_KEY and not config.GEMINI_API_KEY:
-        log.warning("No GROQ_API_KEY / GEMINI_API_KEY configured: the bot will reply that AI services are unavailable.")
+    if not config.api_keys("groq") and not config.api_keys("gemini"):
+        log.warning("No GROQ_API_KEY(S) / GEMINI_API_KEY(S) configured: the bot will reply that AI services are unavailable.")
+    log.info("API keys loaded: groq=%d gemini=%d tavily=%d",
+             len(config.api_keys("groq")), len(config.api_keys("gemini")), len(config.api_keys("tavily")))
 
     # Imported here so that configuration errors above are reported before heavy SDK imports.
     from services.health_server import start_in_background

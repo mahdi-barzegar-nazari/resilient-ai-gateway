@@ -8,6 +8,10 @@ Routing rules
   replayed on the other provider and a short note is appended to the answer.
 * In exam mode the note is suppressed so the machine-readable answer-sheet line survives.
 * Live web context is injected only when the request is served by Gemini (the grounded engine).
+* Several keys per provider are rotated *below* this layer (``services/clients.py`` and
+  ``services/key_pool.py``): a provider call either succeeds with some key or raises, and only then does
+  the cross-provider failover above apply. When every key of a provider is cooling down the call raises
+  at once, so failover is just as immediate as with a single key.
 """
 import logging
 from datetime import datetime

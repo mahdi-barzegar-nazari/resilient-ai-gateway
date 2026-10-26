@@ -55,6 +55,29 @@ class MainTests(unittest.TestCase):
         self.bale_cls.return_value.run.assert_called_once()
         self.thread_cls.assert_not_called()
 
+    def test_ai_keys_given_only_as_lists_do_not_trigger_the_missing_key_warning(self):
+        with mock.patch.object(config, "GROQ_API_KEY", None), mock.patch.object(config, "GEMINI_API_KEY", None), \
+                mock.patch.object(config, "GROQ_API_KEYS", ["g1", "g2"]):
+            with self.assertNoLogs("gateway", "WARNING"):
+                self.assertEqual(main.main(), 0)
+
+    def test_warns_when_no_ai_key_is_configured_at_all(self):
+        with mock.patch.object(config, "GROQ_API_KEY", None), mock.patch.object(config, "GEMINI_API_KEY", None), \
+                mock.patch.object(config, "GROQ_API_KEYS", []), mock.patch.object(config, "GEMINI_API_KEYS", []):
+            with self.assertLogs("gateway", "WARNING") as logs:
+                main.main()
+        self.assertIn("GROQ_API_KEY", logs.output[0])
+
+    def test_startup_logs_how_many_keys_were_loaded_but_never_a_key(self):
+        with mock.patch.object(config, "GROQ_API_KEY", "single-secret"), \
+                mock.patch.object(config, "GROQ_API_KEYS", ["list-secret-1", "list-secret-2", "single-secret"]):
+            with self.assertLogs("gateway", "INFO") as logs:
+                main.main()
+        loaded = [line for line in logs.output if "API keys loaded" in line]
+        self.assertEqual(len(loaded), 1)
+        self.assertIn("groq=3", loaded[0])  # the duplicate was merged
+        self.assertNotIn("secret", "\n".join(logs.output))
+
 
 if __name__ == "__main__":
     unittest.main()

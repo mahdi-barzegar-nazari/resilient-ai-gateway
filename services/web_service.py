@@ -8,10 +8,39 @@ import requests
 
 import config
 from core.errors import ToolError
+from services.key_pool import RATE_LIMITED, Failure, KeyPool, classify_status, retry_after_seconds
 from utils.formatters import truncate_text
 from utils.security import short_err
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------- Tavily key rotation
+# Tavily answers 432 / 433 when the plan or pay-as-you-go quota is used up; plain rate limiting is 429.
+TAVILY_QUOTA_STATUSES = (432, 433)
+tavily_pool = KeyPool("tavily", lambda: config.api_keys("tavily"))
+
+
+def _tavily_failure(res):
+    """A Failure when this Tavily response should be retried with another key (429, quota, 401/403, 5xx)."""
+    status = getattr(res, "status_code", None)
+    if status in TAVILY_QUOTA_STATUSES:
+        return Failure(RATE_LIMITED)
+    return classify_status(status, retry_after_seconds(getattr(res, "headers", None)))
+
+
+def _tavily_post(url, payload, timeout, bearer=False):
+    """POST with the next Tavily key and return the response (whatever its status).
+
+    A rotatable status is retried on the next key; if the keys run out, the last response is returned
+    so the callers keep deciding what a non-200 answer means, exactly as with a single key.
+    """
+    def attempt(key):
+        kwargs = {"json": {"api_key": key, **payload}, "timeout": timeout}
+        if bearer:
+            kwargs["headers"] = {"Authorization": f"Bearer {key}"}
+        return requests.post(url, **kwargs)
+
+    return tavily_pool.call(attempt, check=_tavily_failure)
 
 # ---------------------------------------------------------------- live search context
 EXPLICIT_SEARCH_PHRASES = [
@@ -53,11 +82,11 @@ def fetch_web_context(query):
     search_term = clean_query_for_search(query)
     snippets = []
 
-    if config.TAVILY_API_KEY:
+    if config.api_keys("tavily"):
         try:
-            res = requests.post(
+            res = _tavily_post(
                 "https://api.tavily.com/search",
-                json={"api_key": config.TAVILY_API_KEY, "query": search_term, "search_depth": "basic", "max_results": 4},
+                {"query": search_term, "search_depth": "basic", "max_results": 4},
                 timeout=7
             )
             if res.status_code == 200:
@@ -133,11 +162,10 @@ def clean_page_text(raw):
 def extract_link_contents(urls, max_chars=None):
     """Fetch page text through Tavily Extract. Returns a list of ``(url, cleaned truncated text)``."""
     max_chars = max_chars or config.LINK_MAX_CHARS
-    res = requests.post(
+    res = _tavily_post(
         "https://api.tavily.com/extract",
-        headers={"Authorization": f"Bearer {config.TAVILY_API_KEY}"},
-        json={"api_key": config.TAVILY_API_KEY, "urls": urls, "extract_depth": "basic", "format": "text"},
-        timeout=30
+        {"urls": urls, "extract_depth": "basic", "format": "text"},
+        timeout=30, bearer=True
     )
     res.raise_for_status()
     results = res.json().get("results") or []
@@ -155,11 +183,11 @@ def prepare_link_prompt(user_text):
     """Turn a message containing links into a summarisation prompt.
 
     Returns ``(prompt, memory_text, error_text)``:
-    - no links / no TAVILY_API_KEY / a long pasted text  -> ``(None, None, None)``: handle as a normal message
+    - no links / no Tavily key / a long pasted text      -> ``(None, None, None)``: handle as a normal message
     - extraction failed                                  -> ``(None, None, error_text)``
     - success                                            -> ``(prompt, short note for memory, None)``
     """
-    if not config.TAVILY_API_KEY:
+    if not config.api_keys("tavily"):
         return None, None, None
     urls = extract_urls(user_text)[:config.LINK_MAX_COUNT]
     if not urls:
@@ -187,7 +215,7 @@ def tool_read(arg, model_name=None):
     urls = extract_urls(arg)
     if not urls:
         raise ToolError("لینک را بعد از دستور بنویسید.\nمثال: /read https://example.com/article")
-    if not config.TAVILY_API_KEY:
+    if not config.api_keys("tavily"):
         raise ToolError("خواندن صفحه به TAVILY_API_KEY نیاز دارد.")
     try:
         pages = extract_link_contents(urls[:1], max_chars=config.READ_MAX_CHARS)

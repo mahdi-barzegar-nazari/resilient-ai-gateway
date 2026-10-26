@@ -23,6 +23,10 @@ def _secrets():
         config.GROQ_API_KEY,
         config.GEMINI_API_KEY,
         config.TAVILY_API_KEY,
+        # every key of the *_API_KEYS lists (rotation), not only the singular variables
+        *config.api_keys("groq"),
+        *config.api_keys("gemini"),
+        *config.api_keys("tavily"),
     )
 
 
@@ -33,9 +37,10 @@ def redact_secrets(value):
     the bot token.
     """
     text = str(value)
-    for secret in _secrets():
-        if secret:
-            text = text.replace(secret, "***")
+    # Longest first: if one key is a prefix of another, masking the short one first would leave a
+    # readable tail of the long one behind.
+    for secret in sorted(set(filter(None, _secrets())), key=len, reverse=True):
+        text = text.replace(secret, "***")
     return text
 
 
