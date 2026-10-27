@@ -25,5 +25,5 @@ LONG_SYSTEM_PROMPT = """
 """
 
 # Appended to the answer when the request was served by the *other* provider.
-FAILOVER_NOTE_TO_GEMINI = "\n\n↪️ (Groq پاسخ نداد؛ این پاسخ با Gemini تولید شد)"
-FAILOVER_NOTE_TO_GROQ = "\n\n↪️ (Gemini پاسخ نداد؛ این پاسخ با Groq تولید شد)"
+FAILOVER_NOTE_TO_GEMINI = "\n\n↪️ (سرویس Groq پاسخ نداد؛ این پاسخ با Gemini تولید شد)"
+FAILOVER_NOTE_TO_GROQ = "\n\n↪️ (سرویس Gemini پاسخ نداد؛ این پاسخ با Groq تولید شد)"
