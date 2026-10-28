@@ -27,3 +27,8 @@ services:
         sync: false
       - key: ALLOWED_USERS
         sync: false
+      # Per-user rate limit: AI-consuming requests per user within the window. 0 turns it off.
+      - key: RATE_LIMIT_MAX
+        value: "20"
+      - key: RATE_LIMIT_WINDOW_SECONDS
+        value: "60"

@@ -15,6 +15,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import config
 from bot import messages
 from core.pipeline import run_chat
+from core.ratelimit import check_rate_limit, is_metered_tool
 from core.session import PLATFORM_TELEGRAM, SETTING_ACTIONS, sessions
 from services import clients, quiz_service
 from services.ai_router import quick_web_answer
@@ -37,6 +38,19 @@ def _authorized(handler):
     @functools.wraps(handler)
     def wrapper(self, message):
         if not is_authorized(message.from_user.id):
+            return None
+        return handler(self, message)
+    return wrapper
+
+
+def _rate_limited(handler):
+    """Count the message against the user's rate limit before the handler downloads or calls anything.
+
+    Stack it *under* ``_authorized`` so that the allow-list is checked first.
+    """
+    @functools.wraps(handler)
+    def wrapper(self, message):
+        if not self._within_limit(message.from_user.id, message):
             return None
         return handler(self, message)
     return wrapper
@@ -138,6 +152,13 @@ class TelegramApp:
     def _session(self, chat_id):
         return sessions.get(PLATFORM_TELEGRAM, chat_id)
 
+    def _within_limit(self, user_id, message):
+        """True when this request may proceed. Otherwise it is dropped, with one notice per window."""
+        decision = check_rate_limit(PLATFORM_TELEGRAM, user_id)
+        if decision.notify:
+            self.reply(message, messages.rate_limited_text(decision.retry_after))
+        return decision.allowed
+
     # ------------------------------------------------------------ sending
     def _send(self, message, text, first, **kwargs):
         # first chunk as a reply, the rest as plain follow-up messages
@@ -238,6 +259,7 @@ class TelegramApp:
 
     # ------------------------------------------------------------ web tools
     @_authorized
+    @_rate_limited
     def on_testweb(self, message):
         _, arg = split_command(message.text)
         query = arg or "قیمت دلار"
@@ -250,6 +272,7 @@ class TelegramApp:
             self.reply(message, "❌ موتور وب‌سرچ پاسخی برنگرداند.")
 
     @_authorized
+    @_rate_limited
     def on_web(self, message):
         _, query = split_command(message.text)
         if not query:
@@ -265,6 +288,9 @@ class TelegramApp:
     @_authorized
     def on_tool(self, message):
         cmd, arg = split_command(message.text)
+        # /wiki and /arxiv only call free public APIs, so they do not use the AI quota.
+        if is_metered_tool(cmd) and not self._within_limit(message.from_user.id, message):
+            return
         chat_id = message.chat.id
         self.bot.send_chat_action(chat_id, 'typing')
         self.reply(message, run_tool(cmd, arg, self._session(chat_id).model), escape=True)
@@ -281,6 +307,7 @@ class TelegramApp:
         )
 
     @_authorized
+    @_rate_limited
     def on_quiz(self, message):
         _, arg = split_command(message.text)
         self._send_quiz(message, arg)
@@ -298,6 +325,9 @@ class TelegramApp:
 
         if parts[1] == "next":
             self._answer_callback(call)
+            # The new question is an AI call. Over the limit, the buttons stay so the user can tap again later.
+            if not self._within_limit(call.from_user.id, call.message):
+                return
             self._clear_buttons(chat_id, call.message.message_id)
             self._send_quiz(call.message)
             return
@@ -316,6 +346,7 @@ class TelegramApp:
 
     # ------------------------------------------------------------ media
     @_authorized
+    @_rate_limited
     def on_document(self, message):
         chat_id = message.chat.id
         doc = message.document
@@ -350,6 +381,7 @@ class TelegramApp:
         )
 
     @_authorized
+    @_rate_limited
     def on_voice(self, message):
         is_voice = message.voice is not None
         media = message.voice or message.audio
@@ -374,6 +406,7 @@ class TelegramApp:
         self.answer(message, text)
 
     @_authorized
+    @_rate_limited
     def on_photo(self, message):
         chat_id = message.chat.id
         if not clients.gemini_client:
@@ -407,4 +440,7 @@ class TelegramApp:
             if result is not None:
                 self.reply(message, result[1], escape=True, reply_markup=quiz_next_keyboard())
                 return
+        # Grading a quiz answer is local and free, so it is decided above; everything else goes to the AI.
+        if not self._within_limit(message.from_user.id, message):
+            return
         self.answer(message, message.text)

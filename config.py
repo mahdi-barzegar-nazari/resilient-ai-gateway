@@ -110,5 +110,11 @@ KEY_COOLDOWN_RATE_LIMIT_MAX = _env_number("KEY_COOLDOWN_RATE_LIMIT_MAX", 300.0) 
 KEY_COOLDOWN_TRANSIENT = _env_number("KEY_COOLDOWN_TRANSIENT", 15.0)     # timeout, connection error, 5xx
 KEY_COOLDOWN_AUTH = _env_number("KEY_COOLDOWN_AUTH", 3600.0)             # 401 / 403: the key is probably dead
 
+# ---------------------------------------------------------------- per-user rate limit
+# At most RATE_LIMIT_MAX AI-consuming requests per RATE_LIMIT_WINDOW_SECONDS, counted separately for every
+# (platform, user id). RATE_LIMIT_MAX=0 switches the limit off. Both can be overridden through the environment.
+RATE_LIMIT_MAX = _env_number("RATE_LIMIT_MAX", 20, int, 0)
+RATE_LIMIT_WINDOW_SECONDS = _env_number("RATE_LIMIT_WINDOW_SECONDS", 60.0, float, 1)
+
 # ---------------------------------------------------------------- endpoints
 BALE_API_BASE = "https://tapi.bale.ai"

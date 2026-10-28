@@ -91,3 +91,8 @@ NO_RESPONSE = "پاسخی دریافت نشد."
 
 def voice_too_long_text(max_seconds):
     return f"⏱️ پیام صوتی بیش از {max_seconds // 60} دقیقه است؛ لطفاً کوتاه‌تر بفرستید."
+
+
+def rate_limited_text(seconds):
+    """Notice for a user over the rate limit; ``seconds`` is how long to wait."""
+    return f"⏳ فعلاً درخواست‌هایتان به سقف مجاز رسیده؛ لطفاً {seconds} ثانیه دیگر دوباره امتحان کنید."

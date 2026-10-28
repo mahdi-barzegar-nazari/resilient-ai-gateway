@@ -26,7 +26,7 @@ A cross-platform **Telegram + Bale** AI assistant that keeps answering when a pr
 
 It is designed as a **network-boundary gateway**: users on a restricted national network talk to a domestic messenger, and this server, running outside, talks to the international AI APIs and websites on their behalf.
 
-The codebase is layered (`bot → core → services → utils`), every behaviour listed below is pinned by an offline regression test, and the whole suite of 363 tests runs in well under a second with no API keys.
+The codebase is layered (`bot → core → services → utils`), every behaviour listed below is pinned by an offline regression test, and the whole suite of 459 tests runs in well under a second with no API keys.
 
 ## Features
 
@@ -37,10 +37,13 @@ The codebase is layered (`bot → core → services → utils`), every behaviour
 - **Several API keys per provider.** `GROQ_API_KEYS`, `GEMINI_API_KEYS` and `TAVILY_API_KEYS` take comma-separated
   keys; requests rotate round-robin, and a key that is rate limited, times out or fails is skipped for a while.
   One key behaves exactly as before.
+- **Per-user rate limiting.** Each user gets 20 AI-consuming requests per 60 seconds (`RATE_LIMIT_MAX`,
+  `RATE_LIMIT_WINDOW_SECONDS`; `0` turns it off), counted separately on Telegram and Bale. Over the limit, the user
+  gets one short notice with the seconds to wait; commands that cost no quota are never counted.
 - **Multimodal input.** Voice notes (Whisper), images and PDFs (Gemini), links (Tavily Extract).
 - **Message-safe output.** Code-fence-aware chunking, HTML escaping with plain-text fallback.
 - **Privacy-first defaults.** Conversation memory is **off** until the user opts in; secrets are redacted from every log line.
-- **Tested without the network.** 363 unit tests run in well under a second, with no API keys.
+- **Tested without the network.** 459 unit tests run in well under a second, with no API keys.
 
 ### Capabilities
 
@@ -59,6 +62,7 @@ The codebase is layered (`bot → core → services → utils`), every behaviour
 | Exam mode (single-line answer-sheet output) | ✅ | ✅ | Dedicated prompt + low temperature |
 | Inline-keyboard control panel | ✅ | — | Telegram only |
 | Allow-list access control | ✅ | ✅ | `ALLOWED_USERS` |
+| Per-user rate limit (sliding window) | ✅ | ✅ | `core/ratelimit.py` |
 
 ## Quickstart
 
@@ -91,6 +95,7 @@ Each provider also accepts several keys (`GROQ_API_KEYS`, `GEMINI_API_KEYS`, `TA
 | `KEY_MAX_ATTEMPTS` `KEY_RETRY_BUDGET_SECONDS` | optional | Rotation bounds: keys tried per request (default 3) and the time after which no further key is tried (default 90 s) |
 | `KEY_COOLDOWN_RATE_LIMIT` `KEY_COOLDOWN_RATE_LIMIT_MAX` `KEY_COOLDOWN_TRANSIENT` `KEY_COOLDOWN_AUTH` | optional | Seconds a key is skipped after: a 429 without `Retry-After` (60), the cap for `Retry-After` (300), a timeout, connection error or 5xx (15), a 401/403 (3600) |
 | `ALLOWED_USERS` | recommended | Comma-separated numeric ids; empty = open to everyone |
+| `RATE_LIMIT_MAX` `RATE_LIMIT_WINDOW_SECONDS` | optional | Per-user rate limit: AI-consuming requests allowed per window, counted separately for each platform (defaults: 20 per 60 s). `RATE_LIMIT_MAX=0` turns it off. |
 | `MODEL_FAST` `MODEL_SMART` `MODEL_GEMINI` `MODEL_WHISPER` | optional | Override the default model names |
 | `WHISPER_LANGUAGE` | optional | Default `fa`; empty string = auto-detect |
 | `PORT` | optional | Health-check server port (default 8080) |
@@ -124,6 +129,7 @@ mock a call fails loudly instead of hanging. CI runs the suite on Python 3.10 �
 ├── core/
 │   ├── session.py             # Session + SessionStore (per platform and chat)
 │   ├── pipeline.py            # run_chat: links → router → memory
+│   ├── ratelimit.py           # per-user rate limit (sliding window)
 │   ├── prompts.py             # system prompts, failover notes
 │   └── errors.py
 ├── services/
@@ -141,7 +147,7 @@ mock a call fails loudly instead of hanging. CI runs the suite on Python 3.10 �
 │   ├── formatters.py          # chunking, HTML conversion, truncation
 │   ├── security.py            # allow-list, secret redaction
 │   └── log.py                 # redacting log formatter
-├── tests/                     # 363 offline unit tests
+├── tests/                     # 459 offline unit tests
 ├── docs/                      # architecture notes, banner
 ├── Dockerfile · render.yaml · .env.example
 ├── .github/                   # CI workflow, Dependabot
@@ -155,7 +161,8 @@ flowchart TD
 
     TG --> AUTH["Allow-list check"]
     BL --> AUTH
-    AUTH --> ROUTE{"Message type"}
+    AUTH --> LIMIT["Per-user rate limit<br/>(counts AI-consuming actions only)"]
+    LIMIT --> ROUTE{"Message type"}
 
     ROUTE -->|"voice"| STT["audio_service<br/>Whisper via Groq"]
     ROUTE -->|"image or PDF"| MEDIA["media_service<br/>multimodal input"]
@@ -176,6 +183,7 @@ flowchart TD
     P2 -. "error" .-> P1
 
     ROUTER --> OUT["formatters<br/>escape and fence-aware chunking"]
+    LIMIT -. "over the limit: one notice, then silence" .-> OUT
     OUT --> TG
     OUT --> BL
 ```
@@ -184,8 +192,8 @@ flowchart TD
 
 | Layer | Package | Responsibility |
 |---|---|---|
-| Adapters | `bot/` | Receive updates, enforce the allow-list, download media, render replies (HTML, chunks, keyboards). **No decision logic.** |
-| Core | `core/` | `Session` state per `(platform, chat)`, the shared `run_chat` pipeline, system prompts. |
+| Adapters | `bot/` | Receive updates, enforce the allow-list, apply the per-user rate limit, download media, render replies (HTML, chunks, keyboards). **No decision logic.** |
+| Core | `core/` | `Session` state per `(platform, chat)`, the shared `run_chat` pipeline, the per-user rate limiter, system prompts. |
 | Services | `services/` | AI router, API-key rotation, web search & link extraction, audio, media prompts, Wikipedia/ArXiv, quiz, tools. **Never import adapters.** |
 | Utils | `utils/` | Pure helpers: chunking, HTML conversion, redaction, authorization, logging. |
 | Config | `config.py` | Environment variables, model names, limits. Read as `config.X` at call time so tests can override. |
@@ -195,10 +203,11 @@ Dependencies point one way: `bot → core → services → utils / config`. The 
 ### Life of a message
 
 1. The adapter (`bot/`) receives the update and checks the **allow-list**.
-2. Voice is transcribed, images and PDFs become multimodal input, and commands go to the tools.
-3. `core.pipeline.run_chat` extracts and summarises links (not in exam mode, not for media).
-4. `ai_router` sends the request to the selected provider and replays it on the other one on failure.
-5. The output is escaped, split on line boundaries without breaking code fences, and sent.
+2. Each request that can spend provider quota (free text, voice, images, PDFs and every command that calls Groq, Gemini or Tavily) is counted against the user's **rate limit**. Over the limit, the user gets one short notice and the request stops there: nothing is downloaded and no provider is called.
+3. Voice is transcribed, images and PDFs become multimodal input, and commands go to the tools.
+4. `core.pipeline.run_chat` extracts and summarises links (not in exam mode, not for media).
+5. `ai_router` sends the request to the selected provider and replays it on the other one on failure.
+6. The output is escaped, split on line boundaries without breaking code fences, and sent.
 
 The sequence diagram of a failover, the threading model, and how to extend the project are in [`docs/architecture.md`](./docs/architecture.md).
 
@@ -286,6 +295,16 @@ bypasses the pool and behaves exactly as before. Keys appear in logs only as pro
 key of every list is redacted.
 → `services/key_pool.py`, `services/clients.py` · `tests/test_key_pool.py`, `tests/test_key_rotation.py`
 
+**13. Per-user rate limiting that both messengers share.**
+`core/ratelimit.py` keeps a sliding-window log per `(platform, user id)`: 20 requests per 60 s by default, one lock,
+an injectable clock, and only *accepted* requests recorded, so spamming never extends a block. The adapters call it
+right after the allow-list and before any download or provider call, and only for actions that can spend quota:
+free text, voice, photos, PDFs and the commands that call Groq, Gemini or Tavily. `/start`, the panel, settings,
+`/clear`, quiz grading, `/quiz_stop`, `/wiki` and `/arxiv` are free. An over-limit user gets one Persian notice per
+window with the seconds to wait, then silence. Entries are swept out once their window and notice cooldown are over,
+so memory follows the users active in the last minute, not everyone ever seen.
+→ `core/ratelimit.py`, `bot/telegram_handler.py` and `bot/bale_handler.py` (`_within_limit`) · `tests/test_ratelimit.py`, `tests/test_ratelimit_adapters.py`
+
 ## Commands
 
 | Command | What it does |
@@ -306,11 +325,13 @@ key of every list is redacted.
 | send a **voice note / photo** | Transcribed and answered / analysed |
 | `/web <query>`, `/testweb` | Telegram only: force a live web answer / inspect raw search output |
 
+Free text, voice notes, images, PDFs and every command that calls Groq, Gemini or Tavily count towards the per-user rate limit. `/start`, `/panel`, the settings commands, `/clear`, quiz answers, `/quiz_stop`, `/wiki` and `/arxiv` do not.
+
 ## Quality Gates
 
 | Gate | Tool | Where it runs |
 | :--- | :--- | :--- |
-| 363 offline unit tests, no network and no API keys | `unittest` (Python 3.10 to 3.12) | CI, local |
+| 459 offline unit tests, no network and no API keys | `unittest` (Python 3.10 to 3.12) | CI, local |
 | Every module byte-compiles | `compileall` | CI |
 | Secret redaction in errors and logs | [`tests/test_security.py`](./tests/test_security.py) | CI |
 | Dependency and base-image updates | Dependabot (pip, Docker, Actions) | Weekly |
@@ -319,18 +340,17 @@ Linting and static typing are not configured yet; see the roadmap.
 
 ## Trade-offs and Roadmap
 
-- [ ] **State is in memory.** Sessions, memory and quiz progress reset on restart. Next step: SQLite or Redis behind the `SessionStore` interface.
+- [ ] **State is in memory.** Sessions, memory, quiz progress and rate-limit counters reset on restart. Next step: SQLite or Redis behind the `SessionStore` interface.
 - [ ] **Bale updates are handled sequentially.** A slow model call delays other Bale users. Next step: a per-chat worker pool.
 - [ ] **Search is triggered by keyword heuristics** (`should_search_web`). Next step: let the model decide through tool calling.
 - [ ] **Images and PDFs are Gemini-only**, so they have no failover. PDFs are uploaded inline (15 MB cap); the Files API would lift that.
-- [ ] **No per-user rate limiting** yet; the allow-list is the only abuse control.
 - [ ] **Key cooldowns are in memory and per key, not per model.** They reset on restart, and a rate limit on one Groq model (or on Whisper) also rests the key for the others. Next step: track cooldowns per `(key, model)`, and share them between instances if the bot ever scales out.
 - [ ] **Lint and typing.** Add Ruff and a static type checker to CI.
 
 ## Security
 
 - Keep `.env` out of version control (it is in `.gitignore`); rotate any token that was ever committed.
-- Set `ALLOWED_USERS` on any public deployment: every message costs provider quota.
+- Set `ALLOWED_USERS` on any public deployment: every message costs provider quota. The per-user rate limit (on by default) caps how fast each user can spend it, but it does not replace the allow-list.
 - Page text fetched from links is treated as untrusted data in the prompt; it is still model input, so do not give this bot tools that can act on the outside world without further hardening.
 - Report vulnerabilities privately, as described in [`SECURITY.md`](./SECURITY.md).
 

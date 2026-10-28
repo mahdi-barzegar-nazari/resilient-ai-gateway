@@ -12,6 +12,7 @@ import requests
 import config
 from bot import messages
 from core.pipeline import run_chat
+from core.ratelimit import check_rate_limit, is_metered_tool
 from core.session import PLATFORM_BALE, sessions
 from services import clients, quiz_service
 from services.audio_service import audio_filename, transcribe_audio
@@ -112,6 +113,13 @@ class BaleApp:
     def _session(self, chat_id):
         return sessions.get(PLATFORM_BALE, chat_id)
 
+    def _within_limit(self, chat_id, user_id):
+        """True when this request may proceed. Otherwise it is dropped, with one notice per window."""
+        decision = check_rate_limit(PLATFORM_BALE, user_id)
+        if decision.notify:
+            self.send(chat_id, messages.rate_limited_text(decision.retry_after))
+        return decision.allowed
+
     def answer(self, chat_id, user_text, image=None, memory_text=None):
         """Shared reply path for text, transcribed voice, images and PDFs."""
         reply = run_chat(self._session(chat_id), user_text, image=image, memory_text=memory_text)
@@ -182,12 +190,15 @@ class BaleApp:
         )
 
     # ------------------------------------------------------------ student tools
-    def handle_tools(self, chat_id, user_text):
+    def handle_tools(self, chat_id, user_text, user_id=None):
         """/debug /read /wiki /arxiv /arxiv_full /quiz /quiz_stop and typed quiz answers (A-D).
 
-        Returns True when the message was handled (and a reply has been sent).
+        Returns True when the message was handled (a reply was sent, or the rate limit dropped it).
+        ``user_id`` is the sender, used for the rate limit; it defaults to the chat, like in ``handle_message``.
         """
         session = self._session(chat_id)
+        if user_id is None:
+            user_id = chat_id
 
         letter = quiz_service.parse_quiz_letter(user_text)
         if letter and quiz_service.has_active_quiz(session):
@@ -201,9 +212,14 @@ class BaleApp:
         cmd, arg = split_command(user_text)
 
         if cmd in TOOLS:
+            # /wiki and /arxiv only call free public APIs, so they do not use the AI quota.
+            if is_metered_tool(cmd) and not self._within_limit(chat_id, user_id):
+                return True
             self.send(chat_id, run_tool(cmd, arg, session.model))
             return True
         if cmd == "quiz":
+            if not self._within_limit(chat_id, user_id):
+                return True
             text, _ = quiz_service.start_quiz(session, arg, quiz_service.QUIZ_ANSWER_HINT_TEXT)
             self.send(chat_id, text)
             return True
@@ -228,6 +244,10 @@ class BaleApp:
         if not is_authorized_bale(from_user_id, chat_id):
             # The numeric id is shown on purpose: it is what the owner must put in ALLOWED_USERS.
             self.send(chat_id, f"⛔️ دسترسی غیرمجاز!\nشناسه عددی بله شما: {from_user_id}")
+            return
+
+        # Voice, photos and documents all reach a provider: count them before anything is downloaded.
+        if not user_text and (voice or photos or document) and not self._within_limit(chat_id, from_user_id):
             return
 
         session = self._session(chat_id)
@@ -257,9 +277,12 @@ class BaleApp:
             self.send(chat_id, messages.BALE_ACTION_REPLIES[action])
             return
 
-        if self.handle_tools(chat_id, user_text):
+        if self.handle_tools(chat_id, user_text, from_user_id):
             return
 
+        # Free text and unknown commands go to the AI. Quiz grading and the commands above are free.
+        if not self._within_limit(chat_id, from_user_id):
+            return
         self.answer(chat_id, user_text)
 
     # ------------------------------------------------------------ polling

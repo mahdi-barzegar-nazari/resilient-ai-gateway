@@ -13,8 +13,8 @@ How the gateway is built, why it is built that way, and where to change it. For 
 
 | Layer | Package | Rule |
 | :--- | :--- | :--- |
-| Adapters | `bot/` | Talk to one messenger. Check the allow-list, download media, render replies. **No decision logic.** |
-| Core | `core/` | `Session` state and the shared `run_chat` pipeline. |
+| Adapters | `bot/` | Talk to one messenger. Check the allow-list, ask the rate limiter, download media, render replies. **No decision logic.** |
+| Core | `core/` | `Session` state, the shared `run_chat` pipeline and the per-user rate limiter. |
 | Services | `services/` | Provider routing, API-key rotation, web, audio, media, knowledge, quiz, tools. **Never import `bot/`.** |
 | Utils | `utils/` | Pure helpers with no knowledge of the layers above. |
 | Config | `config.py` | Read as `config.NAME` at call time, never `from config import NAME`, so tests can patch a value. |
@@ -111,6 +111,29 @@ Each provider accepts several keys: `GROQ_API_KEYS`, `GEMINI_API_KEYS` and `TAVI
 
 **Logs and secrets.** One INFO line per rotation, naming only the provider and the key's position, e.g. `[key-rotation] groq key #1/3 rate limited (cooldown 60s); rotating to key #2/3`. No part of a key is ever logged, and `_secrets()` in `utils/security.py` returns every key of every list, so `redact_secrets` masks them all (longest first, so a key that is a prefix of another leaves no readable tail). Users see no message about rotation.
 
+## Per-user rate limit
+
+Each user may spend a limited number of provider calls: `RATE_LIMIT_MAX` AI-consuming requests (default 20) per `RATE_LIMIT_WINDOW_SECONDS` (default 60). The budget belongs to a `(platform, user id)` pair, so the same numeric id on Telegram and on Bale never shares a bucket, and it follows the person rather than the chat (two people in one group each have their own). `RATE_LIMIT_MAX=0` switches the limit off. All decision logic is in `core/ratelimit.py`; an adapter calls `check_rate_limit(platform, user_id)` and, when the answer says so, sends `messages.rate_limited_text(seconds)`. Telegram and Bale therefore cannot drift apart.
+
+**Where it runs and what counts.** Right after the allow-list and before any download or provider call, so a blocked request costs nothing and an unauthorised user never reaches the limiter.
+
+| Counted | Not counted |
+| :--- | :--- |
+| Free text, voice, photos and PDFs | `/start`, `/panel`, `/menu`, `/help`, the panel buttons |
+| `/debug`, `/read`, `/arxiv_full`, `/web`, `/search`, `/testweb` | `/fast` `/smart` `/gemini`, `/memory_*`, `/exam_*`, `/long_*`, `/clear` |
+| `/quiz` and the quiz "next question" button | Quiz answers (buttons or typed), `/quiz_stop` |
+| Any unknown command (it goes to the model as text) | `/wiki`, `/arxiv`: they only call the keyless Wikipedia and ArXiv APIs |
+
+One request is one unit even when it reaches two providers (a voice note is Whisper, then chat; `/quiz` retries once on malformed JSON). Typed quiz answers are graded before the check, because grading is local. The tool rule is `QUOTA_FREE_TOOLS` in `core/ratelimit.py`; every other tool counts, so a command added later is limited until it is listed there on purpose.
+
+**Algorithm.** A sliding-window log: for each user, the times of their accepted requests. A request is accepted while fewer than `RATE_LIMIT_MAX` of them are younger than the window, and only then is it recorded. So a rejected request never extends a block, a user holds at most `RATE_LIMIT_MAX` timestamps, and no window-long interval ever contains more than the limit (a fixed window would allow twice that across its boundary). Checking and recording are one step under one lock, so concurrent polling threads cannot both take the last slot. `Decision.retry_after` is the number of whole seconds, rounded up and at least 1, until a slot frees up.
+
+**The notice.** `check_rate_limit` returns a `Decision(allowed, notify, retry_after)`. The first refusal returns `notify=True` and the adapter replies once with a short Persian message naming the seconds to wait; later refusals return `notify=False` and are dropped silently. The rule is "at most one notice per user per window", measured from the previous notice. On Telegram the notice is a reply to the offending message; for the quiz "next" button the tap is acknowledged and the button stays, so the user can press it again later.
+
+**Cleanup.** `check` sweeps at most once per window. It drops a user once every timestamp has expired **and** the notice cooldown is over (dropping one earlier would forget that a notice was just sent, and a second could follow within the window). Memory therefore follows the users active in the last one to two windows, not everyone ever seen. When the limit is disabled nothing is stored.
+
+**State and threads.** Counters are in memory, behind one `threading.Lock` that is never held during I/O. Time comes from an injectable clock (`RateLimiter(clock=...)`, `time.monotonic` by default) and settings are read as `config.NAME` at call time, so tests never sleep and can patch any value. Counters reset on restart and belong to one process: a second instance would have its own budget.
+
 ## State model
 
 State is one `Session` dataclass per `(platform, chat_id)`, held in a thread-safe `SessionStore`:
@@ -135,19 +158,22 @@ The key includes the platform, so chat id `42` on Telegram and on Bale are diffe
 
 ## Testing strategy
 
-The suite uses the standard library only (`unittest`) and runs in about 0.2 s.
+The suite uses the standard library only (`unittest`) and runs in well under a second.
 
 - **Config is patched, not imported by value.** Tests use `mock.patch.object(config, "NAME", value)`, which is why modules read `config.NAME` at call time.
 - **SDKs are stubbed only when missing.** `tests/stubs.py` installs lightweight stand-ins if `groq`, `telebot` and the like are not installed. With `pip install -r requirements.txt` the real libraries are used.
 - **Stubs fail loudly.** Every network-facing stub method raises `AssertionError`, so a test that forgets to mock a call fails instead of hanging.
 - **Regression tests are named after the bug.** For example `VoiceDurationTests` (Bale reports milliseconds) and `PollingTests` (poisoned updates).
+- **Rate-limit tests never sleep either.** The limiter takes an injectable clock (`RateLimiter(clock=FakeClock())`). One set of scenarios (limit boundary, expiry, notice once per window, what counts and what is free, allow-list first) is written against a small driver interface and runs unchanged on Telegram and on Bale, so identical behaviour is checked, not assumed. The concurrency tests make threads switch inside the critical section, so a missing lock fails the build instead of passing by luck.
 - **Rotation tests never sleep.** They patch `key_pool.clock` with `tests.helpers.FakeClock` and advance it by hand, and the integration tests replace `time.sleep` with a function that fails, so any wait inside rotation breaks the build.
 
 | Test file | Tests | Focus |
 | :--- | :---: | :--- |
 | `test_key_pool.py` | 60 | Key parsing and merging, env overrides, error classification, round-robin, cooldowns, bounds, exhaustion, single key, logging, concurrency |
 | `test_telegram_handler.py` | 52 | Wiring, panel, reply rendering with plain-text fallback, documents, voice, photos |
+| `test_ratelimit_adapters.py` | 50 | The rate limit on both platforms with the same scenarios: boundary, expiry, notice once per window, isolation, what is counted and what is free, disabled mode, allow-list first |
 | `test_key_rotation.py` | 46 | Rotation at every call site: Groq chat and Whisper, Gemini text/image/PDF, `/arxiv_full`, Tavily; cross-provider failover |
+| `test_ratelimit.py` | 46 | The limiter itself: boundary, sliding window, user and platform isolation, disabled mode, notices, cleanup, concurrency, `RATE_LIMIT_*` settings |
 | `test_bale_handler.py` | 41 | Routing, voice duration units, media, transport, polling loop |
 | `test_ai_router.py` | 28 | Failover, multimodal routing, prompt assembly, web enrichment |
 | `test_web_service.py` | 28 | Search heuristics, URL extraction, link prompt budget, `/read` |
@@ -159,11 +185,11 @@ The suite uses the standard library only (`unittest`) and runs in about 0.2 s.
 | `test_session.py` | 10 | `Session`, `SessionStore` |
 | `test_security.py` | 14 | Authorization, redaction (including every rotated key) |
 | `test_entrypoint.py` | 8 | Health server, `main()` wiring, key-count startup log |
-| **Total** | **363** | |
+| **Total** | **459** | |
 
 ## Extending the gateway
 
-**Add a command.** Write `tool_x(arg, model_name)` in `services/tools.py` (raise `ToolError` for user-facing problems) and add it to the `TOOLS` dict. Telegram registers `commands=list(TOOLS)` and Bale checks `cmd in TOOLS`, so both pick it up. Then add a row to the *Commands* table in both READMEs and a test.
+**Add a command.** Write `tool_x(arg, model_name)` in `services/tools.py` (raise `ToolError` for user-facing problems) and add it to the `TOOLS` dict. Telegram registers `commands=list(TOOLS)` and Bale checks `cmd in TOOLS`, so both pick it up. Then add a row to the *Commands* table in both READMEs and a test. The command counts against the per-user rate limit automatically; only a command that calls no provider (like `/wiki`) should be listed in `QUOTA_FREE_TOOLS` in `core/ratelimit.py`.
 
 **Add an AI provider.**
 1. Add the key and model name to `config.py` (plus a `*_API_KEYS` list and a branch in `api_keys()` if the provider should support rotation), and the client to `services/clients.py` (`None` when the key is missing; build it with a `KeyPool` facade like Groq and Gemini).
@@ -171,8 +197,8 @@ The suite uses the standard library only (`unittest`) and runs in about 0.2 s.
 3. Add a `call_<provider>` function that **raises on errors and on empty answers**, then extend the routing in `process_ai_query`.
 4. Add tests next to `FailoverTests`.
 
-**Add a messenger.** Create `bot/<name>_handler.py` with an app class: receive updates, call the right `is_authorized*` check, get a session with `sessions.get(PLATFORM, chat_id)`, then call `run_chat` or `run_tool` and render the reply within the platform's message limit. Start it from `main.py`. Nothing in `core/` or `services/` should need to change.
+**Add a messenger.** Create `bot/<name>_handler.py` with an app class: receive updates, call the right `is_authorized*` check, call `check_rate_limit(PLATFORM, user_id)` before every action that can spend provider quota (and send the notice when it asks for one), get a session with `sessions.get(PLATFORM, chat_id)`, then call `run_chat` or `run_tool` and render the reply within the platform's message limit. Start it from `main.py`. Nothing in `core/` or `services/` should need to change.
 
 ## Known trade-offs
 
-Sessions and key cooldowns live in memory, Bale updates are handled one at a time, web search is triggered by keyword heuristics, images and PDFs have no failover, and there is no per-user rate limit. Each has a planned next step in the README's [Trade-offs and Roadmap](../README.md#trade-offs-and-roadmap).
+Sessions, key cooldowns and rate-limit counters live in memory, Bale updates are handled one at a time, web search is triggered by keyword heuristics, and images and PDFs have no failover. Each has a planned next step in the README's [Trade-offs and Roadmap](../README.md#trade-offs-and-roadmap).

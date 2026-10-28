@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import config
+from core import ratelimit
 from core.session import sessions
 from telebot.apihelper import ApiTelegramException
 
@@ -40,12 +41,14 @@ def tg_call(data, chat=1, user=111, message_id=55):
 
 
 class BaseTestCase(unittest.TestCase):
-    """Isolates every test: empty session store, open allow-list, no real sleeping."""
+    """Isolates every test: empty session store, open allow-list, no rate limit, no real sleeping."""
 
     def setUp(self):
         sessions._sessions.clear()
+        ratelimit.limiter.reset()
         patches = [
             mock.patch.object(config, "ALLOWED_USERS", []),
+            mock.patch.object(config, "RATE_LIMIT_MAX", 0),  # off, so only the rate-limit tests ever hit it
             mock.patch("time.sleep", lambda *_: None),
         ]
         for p in patches:
