@@ -230,7 +230,7 @@ class NoticeTests(LimiterTestCase):
                 notices.append(self.clock.now)
             self.clock.advance(0.7)
         self.assertGreater(len(notices), 3)
-        for earlier, later in zip(notices, notices[1:]):
+        for earlier, later in zip(notices, notices[1:], strict=False):
             self.assertGreaterEqual(later - earlier, self.WINDOW)
 
     def test_allowed_requests_never_ask_for_a_notice(self):

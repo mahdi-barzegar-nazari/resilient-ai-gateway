@@ -5,6 +5,7 @@
 <br/>
 
 [![CI](https://github.com/mahdi-barzegar-nazari/resilient-ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/mahdi-barzegar-nazari/resilient-ai-gateway/actions/workflows/ci.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/github/license/mahdi-barzegar-nazari/resilient-ai-gateway?style=flat-square)](./LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](./requirements.txt)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?style=flat-square&logo=docker&logoColor=white)](./Dockerfile)
@@ -333,10 +334,11 @@ Free text, voice notes, images, PDFs and every command that calls Groq, Gemini o
 | :--- | :--- | :--- |
 | 459 offline unit tests, no network and no API keys | `unittest` (Python 3.10 to 3.12) | CI, local |
 | Every module byte-compiles | `compileall` | CI |
+| Lint for likely bugs: pycodestyle, Pyflakes and bugbear rules (`E`, `F`, `W`, `B`), no auto-formatting | [Ruff](https://docs.astral.sh/ruff/) (`ruff check .`) | CI (Python 3.12), local |
 | Secret redaction in errors and logs | [`tests/test_security.py`](./tests/test_security.py) | CI |
 | Dependency and base-image updates | Dependabot (pip, Docker, Actions) | Weekly |
 
-Linting and static typing are not configured yet; see the roadmap.
+Static type checking is not configured yet; see the roadmap.
 
 ## Trade-offs and Roadmap
 
@@ -345,7 +347,7 @@ Linting and static typing are not configured yet; see the roadmap.
 - [ ] **Search is triggered by keyword heuristics** (`should_search_web`). Next step: let the model decide through tool calling.
 - [ ] **Images and PDFs are Gemini-only**, so they have no failover. PDFs are uploaded inline (15 MB cap); the Files API would lift that.
 - [ ] **Key cooldowns are in memory and per key, not per model.** They reset on restart, and a rate limit on one Groq model (or on Whisper) also rests the key for the others. Next step: track cooldowns per `(key, model)`, and share them between instances if the bot ever scales out.
-- [ ] **Lint and typing.** Add Ruff and a static type checker to CI.
+- [ ] **Static typing.** Add a static type checker to CI.
 
 ## Security
 

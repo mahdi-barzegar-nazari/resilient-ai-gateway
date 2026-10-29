@@ -112,7 +112,7 @@ def start_quiz(session, topic_arg, answer_hint):
     stats["recent"] = (stats["recent"] + [quiz["question"][:60]])[-8:]
 
     lines = [f"🧠 سؤال {stats['total'] + 1} — {stats['topic']}", "", quiz["question"], ""]
-    lines += [f"{letter}) {opt}" for letter, opt in zip("ABCD", quiz["options"])]
+    lines += [f"{letter}) {opt}" for letter, opt in zip("ABCD", quiz["options"], strict=False)]
     lines += ["", answer_hint]
     return "\n".join(lines), quiz["id"]
 

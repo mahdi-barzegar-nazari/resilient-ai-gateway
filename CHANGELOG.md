@@ -23,6 +23,7 @@ First public release.
 - Health-check server, `Dockerfile`, and a Render Blueprint (`render.yaml`).
 - 459 offline unit tests and a GitHub Actions workflow running them on Python 3.10 to 3.12.
 - English and Persian READMEs, architecture notes, contributing guide, and security policy.
+- Ruff lint gate: `ruff check .` with the `E`, `F`, `W` and `B` rule families, settings in `pyproject.toml` (no formatter), Ruff pinned in `requirements-dev.txt`, and a separate `lint` job in CI.
 
 ### Changed
 

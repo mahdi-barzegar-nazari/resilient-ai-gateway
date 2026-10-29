@@ -249,7 +249,7 @@ class QuizTests(TelegramTestCase):
 
     def test_question_comes_with_abcd_buttons_carrying_the_question_id(self):
         markup = self.ask()
-        self.assertEqual([b.callback_data for b in self.buttons(markup)], [f"quiz:{l}:1" for l in "ABCD"])
+        self.assertEqual([b.callback_data for b in self.buttons(markup)], [f"quiz:{letter}:1" for letter in "ABCD"])
 
     def test_correct_button_press(self):
         self.ask()

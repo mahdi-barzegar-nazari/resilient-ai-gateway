@@ -5,6 +5,7 @@
 <br/>
 
 [![CI](https://github.com/mahdi-barzegar-nazari/resilient-ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/mahdi-barzegar-nazari/resilient-ai-gateway/actions/workflows/ci.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/github/license/mahdi-barzegar-nazari/resilient-ai-gateway?style=flat-square)](./LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](./requirements.txt)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?style=flat-square&logo=docker&logoColor=white)](./Dockerfile)
@@ -305,10 +306,11 @@ flowchart TD
 | :--- | :--- | :--- |
 | ۴۵۹ تست واحد آفلاین، بدون اینترنت و کلید API | `unittest` (Python 3.10 تا 3.12) | CI، محلی |
 | کامپایل بایت‌کد همه‌ی ماژول‌ها | `compileall` | CI |
+| لینت برای یافتن خطاهای محتمل: قاعده‌های pycodestyle، Pyflakes و bugbear (`E`، `F`، `W`، `B`)، بدون فرمت خودکار | [Ruff](https://docs.astral.sh/ruff/) (`ruff check .`) | CI (Python 3.12)، محلی |
 | حذف کلیدها از خطاها و لاگ‌ها | [`tests/test_security.py`](./tests/test_security.py) | CI |
 | به‌روزرسانی وابستگی‌ها و ایمیج پایه | Dependabot (pip، Docker، Actions) | هفتگی |
 
-لینت و بررسی نوع ایستا هنوز تنظیم نشده‌اند؛ بخش بعد را ببینید.
+بررسی نوع ایستا هنوز تنظیم نشده است؛ بخش بعد را ببینید.
 
 ## محدودیت‌ها و نقشه‌ی راه
 
@@ -317,7 +319,7 @@ flowchart TD
 - [ ] **جستجو با heuristic کلیدواژه‌ای فعال می‌شود** (`should_search_web`). گام بعد: واگذاری تصمیم به خود مدل با tool calling.
 - [ ] **عکس و PDF فقط با Gemini** پردازش می‌شوند و جایگزین ندارند. PDF به‌صورت inline (سقف ۱۵ مگابایت) آپلود می‌شود؛ Files API این سقف را برمی‌دارد.
 - [ ] **استراحت کلیدها در حافظه و به‌ازای هر کلید است، نه هر مدل.** با ری‌استارت پاک می‌شود و محدودیت نرخ یک مدل Groq (یا Whisper) کلید را برای مدل‌های دیگر هم کنار می‌گذارد. گام بعد: نگه‌داری استراحت به‌ازای `(کلید، مدل)` و اشتراک آن بین نمونه‌ها اگر بات روزی چندنمونه‌ای شود.
-- [ ] **لینت و بررسی نوع.** افزودن Ruff و یک type checker ایستا به CI.
+- [ ] **بررسی نوع ایستا.** افزودن یک type checker ایستا به CI.
 
 ## امنیت
 

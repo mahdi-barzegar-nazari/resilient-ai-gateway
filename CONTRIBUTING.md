@@ -13,7 +13,9 @@ cd resilient-ai-gateway
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+pip install -r requirements-dev.txt   # Ruff, pinned
 
+ruff check .
 python -m unittest discover -s tests -t . -v
 ```
 
@@ -31,6 +33,7 @@ The tests need **no network and no API keys**. To run the bot itself, copy `.env
 
 ## Pull request checklist
 
+- [ ] `ruff check .` passes
 - [ ] `python -m unittest discover -s tests -t .` passes
 - [ ] New behaviour has a test, and a bug fix has a regression test
 - [ ] No secrets, tokens or personal IDs in the diff
