@@ -5,7 +5,7 @@ decision logic below is shared, so a behaviour fix lands on both platforms at on
 """
 from core.session import Session
 from services.ai_router import process_ai_query
-from services.web_service import prepare_link_prompt
+from services.web_service import format_sources, prepare_link_prompt
 from utils.security import redact_secrets
 
 
@@ -13,9 +13,12 @@ def run_chat(session: Session, user_text, image=None, memory_text=None):
     """Produce the reply text for one user turn. Never raises; failures become readable text.
 
     - Links in the message are fetched and summarised (skipped in exam mode and for media input).
+    - The router may add live web data to the prompt (never in exam mode, for link summaries, images or PDFs). When it did,
+      up to 3 source links are appended under the answer, before the failover note, and never in exam mode.
     - The exchange is stored in memory only when memory is on and exam mode is off. For links and
-      media a short note is stored instead of the (large) prompt.
+      media a short note is stored instead of the (large) prompt. The stored answer has no source links.
     """
+    sources = []
     try:
         use_web = True
         if image is None and not session.exam_mode:
@@ -35,10 +38,11 @@ def run_chat(session: Session, user_text, image=None, memory_text=None):
             is_long=session.long_mode,
             image=image,
             use_web=use_web,
+            web_sources=sources,
         )
     except Exception as e:
         return f"خطا در پردازش: {redact_secrets(e)}"
 
     if session.memory_on and not session.exam_mode:
         session.remember(memory_text or user_text, answer)
-    return answer + note
+    return answer + ("" if session.exam_mode else format_sources(sources)) + note

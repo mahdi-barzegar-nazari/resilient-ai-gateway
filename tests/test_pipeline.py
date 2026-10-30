@@ -94,5 +94,74 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(s.history, [])
 
 
+
+class WebSourcesTests(unittest.TestCase):
+    """Source links under the answer: label, order, memory and exam mode."""
+
+    LINKS = ["https://a.example/1", "https://b.example/2", "https://c.example/3"]
+
+    def setUp(self):
+        self.kwargs = []
+        self.links = list(self.LINKS)
+        self.note = ""
+
+        def fake_process(user_text, web_sources=None, **kwargs):
+            self.kwargs.append({"web_sources": web_sources, **kwargs})
+            web_sources.extend(self.links)  # what the router does when it searched
+            return "ANSWER", self.note
+
+        for patcher in (
+            mock.patch.object(pipeline, "process_ai_query", fake_process),
+            mock.patch.object(pipeline, "prepare_link_prompt", return_value=(None, None, None)),
+            mock.patch.object(config, "SEARCH_MAX_SOURCES", 3),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_sources_are_appended_under_the_answer_with_the_persian_label(self):
+        out = pipeline.run_chat(Session(), "q")
+        self.assertEqual(out, "ANSWER\n\nمنابع:\n1. https://a.example/1\n2. https://b.example/2\n3. https://c.example/3")
+
+    def test_a_fresh_list_is_given_to_the_router_on_every_turn(self):
+        pipeline.run_chat(Session(), "q")
+        pipeline.run_chat(Session(), "q")
+        first, second = (kw["web_sources"] for kw in self.kwargs)
+        self.assertIsNot(first, second)
+        self.assertEqual(second, self.LINKS)  # not doubled up by the previous turn
+
+    def test_no_links_means_no_label(self):
+        self.links = []
+        self.assertEqual(pipeline.run_chat(Session(), "q"), "ANSWER")
+
+    def test_the_failover_note_comes_after_the_sources(self):
+        self.note = "\n\n↪️ (note)"
+        out = pipeline.run_chat(Session(), "q")
+        self.assertTrue(out.endswith("https://c.example/3\n\n↪️ (note)"))
+        self.assertLess(out.index("منابع:"), out.index("↪️"))
+
+    def test_memory_keeps_the_answer_without_its_sources(self):
+        s = Session(memory_on=True)
+        out = pipeline.run_chat(s, "q")
+        self.assertIn("منابع:", out)
+        self.assertEqual(s.history, [{"role": "user", "content": "q"}, {"role": "assistant", "content": "ANSWER"}])
+
+    def test_exam_mode_never_shows_sources(self):
+        out = pipeline.run_chat(Session(exam_mode=True), "q")
+        self.assertEqual(out, "ANSWER")
+        self.assertNotIn("منابع", out)
+
+    def test_at_most_the_configured_number_of_links_is_shown(self):
+        self.links = [f"https://x.example/{i}" for i in range(6)]
+        self.assertEqual(pipeline.run_chat(Session(), "q").count("https://"), 3)
+        with mock.patch.object(config, "SEARCH_MAX_SOURCES", 2):
+            self.assertEqual(pipeline.run_chat(Session(), "q").count("https://"), 2)
+
+    def test_a_failure_before_the_answer_shows_no_sources(self):
+        with mock.patch.object(pipeline, "process_ai_query", side_effect=RuntimeError("down")):
+            out = pipeline.run_chat(Session(), "q")
+        self.assertTrue(out.startswith("خطا در پردازش:"))
+        self.assertNotIn("منابع", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,7 +27,7 @@ A cross-platform **Telegram + Bale** AI assistant that keeps answering when a pr
 
 It is designed as a **network-boundary gateway**: users on a restricted national network talk to a domestic messenger, and this server, running outside, talks to the international AI APIs and websites on their behalf.
 
-The codebase is layered (`bot → core → services → utils`), every behaviour listed below is pinned by an offline regression test, and the whole suite of 459 tests runs in well under a second with no API keys.
+The codebase is layered (`bot → core → services → utils`), every behaviour listed below is pinned by an offline regression test, and the whole suite of 612 tests runs in well under a second with no API keys.
 
 ## Features
 
@@ -42,9 +42,13 @@ The codebase is layered (`bot → core → services → utils`), every behaviour
   `RATE_LIMIT_WINDOW_SECONDS`; `0` turns it off), counted separately on Telegram and Bale. Over the limit, the user
   gets one short notice with the seconds to wait; commands that cost no quota are never counted.
 - **Multimodal input.** Voice notes (Whisper), images and PDFs (Gemini), links (Tavily Extract).
+- **Smart web search.** A tiny planner call (fast Groq model, Gemini as backup) decides whether a message needs fresh
+  web data and writes the search query from the last few messages, so a follow-up like "and the euro?" works. It serves
+  every engine, identical queries are cached for 10 minutes, and an answer that used the web ends with up to three
+  source links under «منابع:». If the planner fails, the old keyword heuristic takes over.
 - **Message-safe output.** Code-fence-aware chunking, HTML escaping with plain-text fallback.
 - **Privacy-first defaults.** Conversation memory is **off** until the user opts in; secrets are redacted from every log line.
-- **Tested without the network.** 459 unit tests run in well under a second, with no API keys.
+- **Tested without the network.** 612 unit tests run in well under a second, with no API keys.
 
 ### Capabilities
 
@@ -56,7 +60,7 @@ The codebase is layered (`bot → core → services → utils`), every behaviour
 | Image understanding | ✅ | ✅ | Gemini |
 | PDF reading, summaries, exercise solving | ✅ | ✅ | Gemini (native `application/pdf`) |
 | Link summarisation (send a URL) | ✅ | ✅ | Tavily Extract + LLM |
-| Live web context for fresh questions | ✅ | ✅ | Tavily Search → Google News RSS fallback |
+| Live web context for fresh questions, with source links | ✅ | ✅ | Search planner (fast Groq model) → Tavily Search → Google News RSS fallback |
 | `/read` (page text proxy), `/wiki`, `/arxiv`, `/arxiv_full` | ✅ | ✅ | Tavily · MediaWiki API · ArXiv API |
 | `/debug` (error → root cause → fixed code) | ✅ | ✅ | Dedicated prompt, long-output mode |
 | `/quiz` multiple-choice trainer with adaptive difficulty | ✅ buttons or typing | ✅ typing | LLM with a strict JSON contract |
@@ -95,6 +99,7 @@ Each provider also accepts several keys (`GROQ_API_KEYS`, `GEMINI_API_KEYS`, `TA
 | `GROQ_API_KEYS` `GEMINI_API_KEYS` `TAVILY_API_KEYS` | optional | Extra keys, comma-separated, merged with the singular variables above (spaces and empty items are ignored, duplicates removed). With two or more keys per provider, requests rotate round-robin. |
 | `KEY_MAX_ATTEMPTS` `KEY_RETRY_BUDGET_SECONDS` | optional | Rotation bounds: keys tried per request (default 3) and the time after which no further key is tried (default 90 s) |
 | `KEY_COOLDOWN_RATE_LIMIT` `KEY_COOLDOWN_RATE_LIMIT_MAX` `KEY_COOLDOWN_TRANSIENT` `KEY_COOLDOWN_AUTH` | optional | Seconds a key is skipped after: a 429 without `Retry-After` (60), the cap for `Retry-After` (300), a timeout, connection error or 5xx (15), a 401/403 (3600) |
+| `SEARCH_PLANNER_ENABLED` `SEARCH_PLANNER_TIMEOUT_SECONDS` `SEARCH_CACHE_TTL_SECONDS` | optional | Smart web search. The planner is on by default (`false` = keyword heuristic only); one planner call may take 4 s at most (minimum 0.5); identical search queries are reused for 600 s (`0` turns the cache off) |
 | `ALLOWED_USERS` | recommended | Comma-separated numeric ids; empty = open to everyone |
 | `RATE_LIMIT_MAX` `RATE_LIMIT_WINDOW_SECONDS` | optional | Per-user rate limit: AI-consuming requests allowed per window, counted separately for each platform (defaults: 20 per 60 s). `RATE_LIMIT_MAX=0` turns it off. |
 | `MODEL_FAST` `MODEL_SMART` `MODEL_GEMINI` `MODEL_WHISPER` | optional | Override the default model names |
@@ -135,9 +140,10 @@ mock a call fails loudly instead of hanging. CI runs the suite on Python 3.10 �
 │   └── errors.py
 ├── services/
 │   ├── ai_router.py           # Groq ⇄ Gemini routing and failover
+│   ├── search_planner.py      # LLM search planner: needs the web? which query?
 │   ├── clients.py             # SDK clients (incl. long-timeout PDF client)
 │   ├── key_pool.py            # API-key rotation: round-robin, cooldowns
-│   ├── web_service.py         # search context, link extraction, /read
+│   ├── web_service.py         # search, result cache, sources, link extraction, /read
 │   ├── audio_service.py       # Whisper transcription
 │   ├── media_service.py       # image and PDF prompts/metadata
 │   ├── knowledge_service.py   # Wikipedia and ArXiv
@@ -148,7 +154,7 @@ mock a call fails loudly instead of hanging. CI runs the suite on Python 3.10 �
 │   ├── formatters.py          # chunking, HTML conversion, truncation
 │   ├── security.py            # allow-list, secret redaction
 │   └── log.py                 # redacting log formatter
-├── tests/                     # 459 offline unit tests
+├── tests/                     # 612 offline unit tests
 ├── docs/                      # architecture notes, banner
 ├── Dockerfile · render.yaml · .env.example
 ├── .github/                   # CI workflow, Dependabot
@@ -178,12 +184,17 @@ flowchart TD
     EXTRACT --> ROUTER
     TOOLS --> ROUTER
 
-    ROUTER -->|"primary"| P1["Groq"]
-    ROUTER -->|"primary or failover"| P2["Gemini"]
+    ROUTER --> PLAN{"Fresh web data needed?<br/>search planner, keyword fallback"}
+    PLAN -->|"yes: at most one search"| SEARCH["web_service<br/>cached Tavily search"]
+    PLAN -->|"no"| PROMPT["prompt"]
+    SEARCH -->|"+ live data and sources"| PROMPT
+    PROMPT -->|"primary"| P1["Groq"]
+    PROMPT -->|"primary or failover"| P2["Gemini"]
     P1 -. "429, timeout, empty" .-> P2
     P2 -. "error" .-> P1
 
-    ROUTER --> OUT["formatters<br/>escape and fence-aware chunking"]
+    P1 --> OUT["formatters<br/>escape, sources, fence-aware chunking"]
+    P2 --> OUT
     LIMIT -. "over the limit: one notice, then silence" .-> OUT
     OUT --> TG
     OUT --> BL
@@ -207,8 +218,10 @@ Dependencies point one way: `bot → core → services → utils / config`. The 
 2. Each request that can spend provider quota (free text, voice, images, PDFs and every command that calls Groq, Gemini or Tavily) is counted against the user's **rate limit**. Over the limit, the user gets one short notice and the request stops there: nothing is downloaded and no provider is called.
 3. Voice is transcribed, images and PDFs become multimodal input, and commands go to the tools.
 4. `core.pipeline.run_chat` extracts and summarises links (not in exam mode, not for media).
-5. `ai_router` sends the request to the selected provider and replays it on the other one on failure.
-6. The output is escaped, split on line boundaries without breaking code fences, and sent.
+5. `ai_router` asks the search planner whether the message needs fresh web data (never in exam mode, for link summaries, images or PDFs). If it does, one cached search is made and its results join the prompt.
+6. The router sends that prompt to the selected provider and replays it, web data included, on the other one on failure.
+7. When web results were used, up to three source links are appended under the answer (never in exam mode, never stored in memory).
+8. The output is escaped, split on line boundaries without breaking code fences, and sent.
 
 The sequence diagram of a failover, the threading model, and how to extend the project are in [`docs/architecture.md`](./docs/architecture.md).
 
@@ -221,7 +234,7 @@ Each item names where it lives and which tests pin the behaviour.
 one on any failure, including *empty* answers. The Groq client is created with `max_retries=0` whenever a
 Gemini key exists, so failover is immediate instead of waiting out SDK back-off. In exam mode the
 "answered by the other provider" note is suppressed, because the answer-sheet line must stay machine-readable.
-Live web context is injected only on the Gemini path. If both providers fail, the error names both causes.
+Live web context reaches whichever provider answers: it is fetched once, before the first call, and replayed unchanged on failover. If both providers fail, the error names both causes.
 → `services/ai_router.py` · `tests/test_ai_router.py`
 
 **2. Splitting long answers without breaking code blocks.**
@@ -306,6 +319,20 @@ window with the seconds to wait, then silence. Entries are swept out once their 
 so memory follows the users active in the last minute, not everyone ever seen.
 → `core/ratelimit.py`, `bot/telegram_handler.py` and `bot/bale_handler.py` (`_within_limit`) · `tests/test_ratelimit.py`, `tests/test_ratelimit_adapters.py`
 
+**14. Web search that decides for itself.**
+A keyword list cannot tell "قیمت دلار" from "explain price theory", knows nothing about follow-ups, and used to run on
+the Gemini path only. `services/search_planner.py` now makes one tiny call (fast Groq model, Gemini if Groq is missing
+or fails; temperature 0, 4 s timeout, strict JSON `{"search": bool, "query": str}`) that sees the last few messages
+of history, so "and the euro?" becomes a complete query. The reply is parsed defensively (code fences and `<think>`
+blocks stripped, types validated), and any failure, timeout or invalid JSON falls back to the old keyword heuristic, so
+the planner can never block an answer. Greetings, very short messages and explicit "search ..." phrases skip the call.
+The search runs at most once per message, before the first provider is called, so Groq-first, Gemini-first and failover
+all see the same web data; identical queries come from a bounded, thread-safe TTL cache (10 minutes, injectable clock).
+An answer that used web data gets up to three plain-text source links under «منابع:», rendered identically on Telegram
+(HTML) and Bale, never stored in memory and never shown in exam mode. The planner uses the normal key rotation and is
+not counted as an extra request by the rate limiter.
+→ `services/search_planner.py`, `services/web_service.py`, `services/ai_router.py`, `core/pipeline.py` · `tests/test_search_planner.py`, `tests/test_smart_search.py`
+
 ## Commands
 
 | Command | What it does |
@@ -326,13 +353,13 @@ so memory follows the users active in the last minute, not everyone ever seen.
 | send a **voice note / photo** | Transcribed and answered / analysed |
 | `/web <query>`, `/testweb` | Telegram only: force a live web answer / inspect raw search output |
 
-Free text, voice notes, images, PDFs and every command that calls Groq, Gemini or Tavily count towards the per-user rate limit. `/start`, `/panel`, the settings commands, `/clear`, quiz answers, `/quiz_stop`, `/wiki` and `/arxiv` do not.
+Free-text questions search the web by themselves when they need fresh data; `/web` always does, with Gemini, and is unchanged. Free text, voice notes, images, PDFs and every command that calls Groq, Gemini or Tavily count towards the per-user rate limit. `/start`, `/panel`, the settings commands, `/clear`, quiz answers, `/quiz_stop`, `/wiki` and `/arxiv` do not.
 
 ## Quality Gates
 
 | Gate | Tool | Where it runs |
 | :--- | :--- | :--- |
-| 459 offline unit tests, no network and no API keys | `unittest` (Python 3.10 to 3.12) | CI, local |
+| 612 offline unit tests, no network and no API keys | `unittest` (Python 3.10 to 3.12) | CI, local |
 | Every module byte-compiles | `compileall` | CI |
 | Lint for likely bugs: pycodestyle, Pyflakes and bugbear rules (`E`, `F`, `W`, `B`), no auto-formatting | [Ruff](https://docs.astral.sh/ruff/) (`ruff check .`) | CI (Python 3.12), local |
 | Secret redaction in errors and logs | [`tests/test_security.py`](./tests/test_security.py) | CI |
@@ -344,7 +371,6 @@ Static type checking is not configured yet; see the roadmap.
 
 - [ ] **State is in memory.** Sessions, memory, quiz progress and rate-limit counters reset on restart. Next step: SQLite or Redis behind the `SessionStore` interface.
 - [ ] **Bale updates are handled sequentially.** A slow model call delays other Bale users. Next step: a per-chat worker pool.
-- [ ] **Search is triggered by keyword heuristics** (`should_search_web`). Next step: let the model decide through tool calling.
 - [ ] **Images and PDFs are Gemini-only**, so they have no failover. PDFs are uploaded inline (15 MB cap); the Files API would lift that.
 - [ ] **Key cooldowns are in memory and per key, not per model.** They reset on restart, and a rate limit on one Groq model (or on Whisper) also rests the key for the others. Next step: track cooldowns per `(key, model)`, and share them between instances if the bot ever scales out.
 - [ ] **Static typing.** Add a static type checker to CI.

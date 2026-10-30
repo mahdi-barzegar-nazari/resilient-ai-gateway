@@ -1,8 +1,11 @@
 """Live web access: search context, link summarisation and the /read text proxy."""
 import logging
 import re
+import threading
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from collections import OrderedDict, namedtuple
 
 import requests
 
@@ -60,27 +63,160 @@ FILLER_WORDS = [
 ]
 
 
-def should_search_web(text):
-    """Heuristic: does this message need fresh information from the web?"""
-    clean = text.strip().lower()
+MIN_SEARCHABLE_CHARS = 4     # a message shorter than this never searches
+MAX_QUERY_CHARS = 300        # Tavily rejects longer queries
+MAX_SOURCE_URL_CHARS = 500   # a longer link is a tracking monster, not a source worth showing
+SOURCES_LABEL = "منابع:"
+
+
+def _is_greeting(clean):
+    """A greeting ("سلام!" and "hello 👋" count too) or a message with no letter or digit at all."""
+    bare = re.sub(r'[^\w\s]|_', '', clean).strip()
+    return not bare or clean in GREETINGS or bare in GREETINGS
+
+
+def obvious_search_decision(text):
+    """Decide without asking a model whenever the answer is obvious.
+
+    ``True``   an explicit search phrase ("سرچ کن ...", "search ..."): always search.
+    ``False``  a greeting or a very short message: never search.
+    ``None``   anything else: the planner (or, failing that, the keyword heuristic) decides.
+    """
+    clean = (text or "").strip().lower()
     if any(phrase in clean for phrase in EXPLICIT_SEARCH_PHRASES):
         return True
-    if clean in GREETINGS or len(clean) < 4:
+    if len(clean) < MIN_SEARCHABLE_CHARS or _is_greeting(clean):
         return False
+    return None
+
+
+def should_search_web(text):
+    """Keyword heuristic: does this message need fresh information from the web? (The planner's fallback.)"""
+    obvious = obvious_search_decision(text)
+    if obvious is not None:
+        return obvious
+    clean = text.strip().lower()
     return any(word in clean for word in FRESHNESS_TRIGGERS)
 
 
-def clean_query_for_search(text):
+def _strip_search_words(text):
     cleaned = re.sub(r'[؟?!\.,]', '', text)
     for word in FILLER_WORDS:
         cleaned = cleaned.replace(word, '')
-    return cleaned.strip() or text
+    return cleaned.strip()
 
 
-def fetch_web_context(query):
-    """Fetch search snippets: Tavily first, Google News RSS as a keyless fallback."""
-    search_term = clean_query_for_search(query)
-    snippets = []
+def clean_query_for_search(text):
+    return _strip_search_words(text) or text
+
+
+def is_bare_search_request(text):
+    """True when nothing is left once the search words are removed ("سرچ کن", "جستجو کن!")."""
+    rest = _strip_search_words(text).lower()
+    for phrase in sorted(EXPLICIT_SEARCH_PHRASES, key=len, reverse=True):
+        rest = rest.replace(phrase, '')
+    return not re.sub(r'[\W_]+', '', rest)
+
+
+def limit_query(query):
+    """One line of at most ``MAX_QUERY_CHARS`` characters."""
+    return " ".join((query or "").split())[:MAX_QUERY_CHARS]
+
+
+def heuristic_query(text, history=None):
+    """Search query of the keyword path: the cleaned message.
+
+    A bare "سرچ کن" has nothing to search for, so it searches the previous user message of ``history`` instead.
+    """
+    if history and is_bare_search_request(text):
+        for item in reversed(history):
+            content = item.get("content") if isinstance(item, dict) and item.get("role") == "user" else None
+            if isinstance(content, str) and content.strip():
+                return limit_query(clean_query_for_search(content))
+    return limit_query(clean_query_for_search(text))
+
+
+# ---------------------------------------------------------------- search result cache
+class TTLCache:
+    """Bounded, thread-safe cache; an entry expires ``config.SEARCH_CACHE_TTL_SECONDS`` after it was stored.
+
+    At most ``config.SEARCH_CACHE_MAX_ENTRIES`` entries are kept (the oldest are dropped first) and expired ones are swept
+    on every ``put``, so memory stays bounded. A TTL of 0 switches the cache off. The clock is injectable, so tests never
+    sleep; settings are read as ``config.NAME`` at call time; the lock is never held while anything else runs.
+    """
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._items = OrderedDict()  # key -> (expires_at, value), oldest first
+
+    def get(self, key):
+        """The cached value, or ``None`` when it is missing, expired or the cache is off."""
+        if config.SEARCH_CACHE_TTL_SECONDS <= 0:
+            return None
+        now = self._clock()
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                return None
+            if entry[0] <= now:
+                del self._items[key]
+                return None
+            return entry[1]
+
+    def put(self, key, value):
+        ttl = config.SEARCH_CACHE_TTL_SECONDS
+        if ttl <= 0:
+            return
+        now = self._clock()
+        with self._lock:
+            self._items.pop(key, None)  # a re-stored key becomes the newest entry
+            self._items[key] = (now + ttl, value)
+            for stale in [k for k, (expires_at, _) in self._items.items() if expires_at <= now]:
+                del self._items[stale]
+            while len(self._items) > max(1, config.SEARCH_CACHE_MAX_ENTRIES):
+                self._items.popitem(last=False)
+
+    def clear(self):
+        with self._lock:
+            self._items.clear()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._items)
+
+
+search_cache = TTLCache()
+
+
+def _cache_key(search_term):
+    return " ".join(search_term.lower().split())
+
+
+# ---------------------------------------------------------------- web search
+# ``context`` is the snippet text for the prompt, ``sources`` the (de-duplicated, at most SEARCH_MAX_SOURCES) result links.
+WebResult = namedtuple("WebResult", "context sources")
+
+
+def _source_links(urls):
+    """The usable http(s) links among ``urls``: no duplicates, at most ``config.SEARCH_MAX_SOURCES``."""
+    kept = []
+    for url in urls:
+        if not isinstance(url, str):
+            continue
+        url = url.strip()
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except ValueError:
+            continue
+        if parsed.scheme in ("http", "https") and parsed.netloc and len(url) <= MAX_SOURCE_URL_CHARS and url not in kept:
+            kept.append(url)
+    return tuple(kept[:config.SEARCH_MAX_SOURCES])
+
+
+def _search(search_term):
+    """Search for an already cleaned term: Tavily first, Google News RSS as a keyless fallback."""
+    snippets, links = [], []
 
     if config.api_keys("tavily"):
         try:
@@ -95,8 +231,9 @@ def fetch_web_context(query):
                     snippets.append(f"• پاسخ سریع: {data['answer']}")
                 for r in data.get("results", []):
                     snippets.append(f"• {r.get('title', '')}: {r.get('content', '')}")
+                    links.append(r.get("url"))
                 if snippets:
-                    return "\n".join(snippets)
+                    return WebResult("\n".join(snippets), _source_links(links))
         except Exception as e:
             log.warning("Tavily search error: %s", short_err(e))
 
@@ -110,10 +247,56 @@ def fetch_web_context(query):
             for item in root.findall('./channel/item')[:3]:
                 title = item.find('title').text if item.find('title') is not None else ""
                 snippets.append(f"• خبر: {title}")
+                link = item.find('link')
+                links.append(link.text if link is not None else None)
     except Exception as e:
         log.warning("Google News RSS error: %s", short_err(e))
 
-    return "\n".join(snippets)
+    return WebResult("\n".join(snippets), _source_links(links))
+
+
+def fetch_web_context(query, sources=None, cached=False, clean=True):
+    """Fetch search snippets for ``query`` and return them as text ("" when nothing was found).
+
+    ``/web`` and ``/testweb`` call it with just a query: filler words stripped, always live, nothing cached, unchanged.
+    The automatic search of ``ai_router`` passes a finished query (``clean=False``: the planner's wording is not touched, so
+    "python 3.13" stays that way), ``cached=True`` (an identical query within ``SEARCH_CACHE_TTL_SECONDS`` reuses the
+    result) and a ``sources`` list that receives the links of the results.
+    """
+    search_term = clean_query_for_search(query) if clean else limit_query(query)
+    key = _cache_key(search_term)
+    result = search_cache.get(key) if cached else None
+    if result is None:
+        result = _search(search_term)
+        if cached and result.context:  # a failed search is never cached: the next message may succeed
+            search_cache.put(key, result)
+    if sources is not None:
+        sources.extend(result.sources)
+    return result.context
+
+
+# ---------------------------------------------------------------- sources under an answer
+def _printable_url(url):
+    """Percent-encode what would break a chat message: spaces, ``*`` and backticks (the Markdown that
+    ``to_telegram_html`` rewrites), ``<``/``>``, quotes and non-ASCII. The link stays equivalent."""
+    return urllib.parse.quote(url, safe="%:/?#[]@!$&'()+,;=-._~")
+
+
+def format_sources(urls):
+    """The block appended under an answer that used web results: the label and up to 3 numbered links.
+
+    Plain text on purpose: Telegram escapes it like the rest of the answer (``&`` becomes ``&amp;`` and renders as ``&``)
+    and Bale shows it as it is, and both turn bare links into tappable ones. Returns "" when there is no usable link.
+    """
+    shown = []
+    for url in _source_links(urls or ()):
+        printable = _printable_url(url)
+        if printable not in shown:
+            shown.append(printable)
+    if not shown:
+        return ""
+    lines = "\n".join(f"{number}. {url}" for number, url in enumerate(shown, 1))
+    return f"\n\n{SOURCES_LABEL}\n{lines}"
 
 
 # ---------------------------------------------------------------- link summarisation (Tavily Extract)

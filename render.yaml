@@ -32,3 +32,11 @@ services:
         value: "20"
       - key: RATE_LIMIT_WINDOW_SECONDS
         value: "60"
+      # Smart web search: a small model call decides whether a message needs fresh web data.
+      - key: SEARCH_PLANNER_ENABLED
+        value: "true"
+      - key: SEARCH_PLANNER_TIMEOUT_SECONDS
+        value: "4"
+      # Identical search queries are reused for this many seconds. 0 turns the cache off.
+      - key: SEARCH_CACHE_TTL_SECONDS
+        value: "600"

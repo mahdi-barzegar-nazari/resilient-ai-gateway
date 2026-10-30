@@ -37,6 +37,16 @@ def _env_number(name, default, cast=float, minimum=0):
     return value if math.isfinite(value) and value >= minimum else default
 
 
+def _env_bool(name, default):
+    """Boolean env var: 1/true/yes/on or 0/false/no/off in any case; anything else (or unset) gives ``default``."""
+    value = os.environ.get(name, "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 # ---------------------------------------------------------------- secrets / credentials
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 BALE_BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN")
@@ -109,6 +119,17 @@ KEY_COOLDOWN_RATE_LIMIT = _env_number("KEY_COOLDOWN_RATE_LIMIT", 60.0)   # 429 w
 KEY_COOLDOWN_RATE_LIMIT_MAX = _env_number("KEY_COOLDOWN_RATE_LIMIT_MAX", 300.0)  # cap for Retry-After
 KEY_COOLDOWN_TRANSIENT = _env_number("KEY_COOLDOWN_TRANSIENT", 15.0)     # timeout, connection error, 5xx
 KEY_COOLDOWN_AUTH = _env_number("KEY_COOLDOWN_AUTH", 3600.0)             # 401 / 403: the key is probably dead
+
+# ---------------------------------------------------------------- smart web search
+# A tiny LLM "planner" call decides whether a message needs fresh web data and writes the search query from the last few
+# messages. Any planner problem falls back to the keyword heuristic, so it can never block an answer. The first three can be
+# overridden through an environment variable of the same name.
+SEARCH_PLANNER_ENABLED = _env_bool("SEARCH_PLANNER_ENABLED", True)        # false = keyword heuristic only
+SEARCH_PLANNER_TIMEOUT_SECONDS = _env_number("SEARCH_PLANNER_TIMEOUT_SECONDS", 4.0, float, 0.5)  # per planner call
+SEARCH_CACHE_TTL_SECONDS = _env_number("SEARCH_CACHE_TTL_SECONDS", 600.0)  # identical queries; 0 = no cache
+SEARCH_CACHE_MAX_ENTRIES = 128         # the cache never holds more queries than this (oldest dropped first)
+SEARCH_PLANNER_HISTORY_MESSAGES = 4    # recent messages the planner sees (memory must be on for there to be any)
+SEARCH_MAX_SOURCES = 3                 # links appended under an answer that used web results
 
 # ---------------------------------------------------------------- per-user rate limit
 # At most RATE_LIMIT_MAX AI-consuming requests per RATE_LIMIT_WINDOW_SECONDS, counted separately for every

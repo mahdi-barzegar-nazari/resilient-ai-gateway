@@ -7,7 +7,9 @@ Routing rules
 * If the first provider fails (HTTP 429, timeout, empty answer ...) the same request is
   replayed on the other provider and a short note is appended to the answer.
 * In exam mode the note is suppressed so the machine-readable answer-sheet line survives.
-* Live web context is injected only when the request is served by Gemini (the grounded engine).
+* Live web context is added to the prompt before the first provider is called, on the Groq-first and the Gemini-first path
+  alike, and the same enriched prompt is replayed on failover: at most one search per user message. A search planner
+  (``services/search_planner.py``) decides whether the message needs the web and writes the query from recent history.
 * Several keys per provider are rotated *below* this layer (``services/clients.py`` and
   ``services/key_pool.py``): a provider call either succeeds with some key or raises, and only then does
   the cross-provider failover above apply. When every key of a provider is cooling down the call raises
@@ -23,7 +25,8 @@ from core.prompts import (
 )
 from services import clients
 from services.media_service import PDF_MIME
-from services.web_service import should_search_web, fetch_web_context
+from services.search_planner import plan_search
+from services.web_service import fetch_web_context
 from utils.security import short_err
 
 from google.genai import types
@@ -31,13 +34,29 @@ from google.genai import types
 log = logging.getLogger(__name__)
 
 
-def with_web_context(user_text, is_exam=False, use_web=True):
-    """Append live web data to the prompt when the question needs it (use_web=False disables it)."""
-    if use_web and not is_exam and should_search_web(user_text):
-        web_info = fetch_web_context(user_text)
-        if web_info:
-            return f"{user_text}\n\n[داده‌های زنده وب]:\n{web_info}"
-    return user_text
+def with_web_context(user_text, is_exam=False, use_web=True, history=None, sources=None):
+    """Append live web data to the prompt when the question needs it (use_web=False disables it).
+
+    The planner decides whether to search and with which query (``history`` lets follow-ups work). At most one search is made;
+    its result links are appended to ``sources`` when a list is passed. Never raises: if anything in the search path breaks,
+    the question goes on without web data.
+    """
+    if not use_web or is_exam:
+        return user_text
+    try:
+        plan = plan_search(user_text, history)
+        if not plan.search:
+            return user_text
+        found = []
+        web_info = fetch_web_context(plan.query, sources=found, cached=True, clean=False)
+    except Exception as e:
+        log.warning("Web enrichment skipped: %s", short_err(e))
+        return user_text
+    if not web_info:
+        return user_text
+    if sources is not None:
+        sources.extend(found)
+    return f"{user_text}\n\n[داده‌های زنده وب]:\n{web_info}"
 
 
 def call_gemini(user_text, sys_prompt, history, is_exam=False, is_long=False, image=None):
@@ -101,13 +120,16 @@ def call_groq(user_text, sys_prompt, model_name, history, is_exam=False, is_long
 
 
 def process_ai_query(user_text, model_name=None, use_memory=False, history_list=None,
-                     is_exam=False, is_long=False, image=None, use_web=True, task_prompt=None):
+                     is_exam=False, is_long=False, image=None, use_web=True, task_prompt=None, web_sources=None):
     """Answer a prompt. Returns ``(answer, note)``.
 
     ``note`` is non-empty only when a failover happened (and never in exam mode).
 
-    - use_memory/history_list: prior messages are sent only when memory is on and not in exam mode.
-    - use_web=False: skip automatic web enrichment (used for link-summary prompts).
+    - use_memory/history_list: prior messages are sent only when memory is on and not in exam mode; the search planner reads
+      the last few of them, so follow-up questions get a complete search query.
+    - use_web=False: skip automatic web enrichment (used for link-summary prompts). Exam mode, images and PDFs never search.
+    - web_sources: an optional list that receives the links of the web results the answer is based on (empty when no search
+      was made); the caller decides how to show them.
     - task_prompt: extra system instructions of a tool (/debug, /quiz ...).
     - image: image or PDF as ``{"data": bytes, "mime": str}``; always handled by Gemini.
     """
@@ -136,8 +158,10 @@ def process_ai_query(user_text, model_name=None, use_memory=False, history_list=
     groq_model = model_name if model_name != config.MODEL_GEMINI else config.MODEL_FAST
     gemini_first = bool(clients.gemini_client) and (model_name == config.MODEL_GEMINI or not clients.groq_client)
 
+    # One search at most, made before the first provider is called and reused if the request fails over.
+    enriched = with_web_context(user_text, is_exam, use_web, history=history, sources=web_sources)
+
     if gemini_first:
-        enriched = with_web_context(user_text, is_exam, use_web)
         try:
             return call_gemini(enriched, sys_prompt, history, is_exam, is_long), ""
         except Exception as e1:
@@ -151,12 +175,11 @@ def process_ai_query(user_text, model_name=None, use_memory=False, history_list=
             return text, ("" if is_exam else FAILOVER_NOTE_TO_GROQ)
 
     try:
-        return call_groq(user_text, sys_prompt, groq_model, history, is_exam, is_long), ""
+        return call_groq(enriched, sys_prompt, groq_model, history, is_exam, is_long), ""
     except Exception as e1:
         log.warning("[failover] Groq failed: %s", short_err(e1))
         if not clients.gemini_client:
             raise
-        enriched = with_web_context(user_text, is_exam, use_web)
         try:
             text = call_gemini(enriched, sys_prompt, history, is_exam, is_long)
         except Exception as e2:

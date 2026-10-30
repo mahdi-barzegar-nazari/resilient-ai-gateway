@@ -15,7 +15,7 @@ How the gateway is built, why it is built that way, and where to change it. For 
 | :--- | :--- | :--- |
 | Adapters | `bot/` | Talk to one messenger. Check the allow-list, ask the rate limiter, download media, render replies. **No decision logic.** |
 | Core | `core/` | `Session` state, the shared `run_chat` pipeline and the per-user rate limiter. |
-| Services | `services/` | Provider routing, API-key rotation, web, audio, media, knowledge, quiz, tools. **Never import `bot/`.** |
+| Services | `services/` | Provider routing, API-key rotation, search planner, web, audio, media, knowledge, quiz, tools. **Never import `bot/`.** |
 | Utils | `utils/` | Pure helpers with no knowledge of the layers above. |
 | Config | `config.py` | Read as `config.NAME` at call time, never `from config import NAME`, so tests can patch a value. |
 
@@ -38,9 +38,10 @@ If Telegram is not configured, Bale runs on the main thread instead. With neithe
 The flowchart in the [README](../README.md#architecture) shows the full routing. The core of it is `core.pipeline.run_chat(session, user_text, image=None, memory_text=None)`:
 
 1. Unless the chat is in exam mode or the input is media, links in the text are fetched and turned into a bounded prompt (`prepare_link_prompt`). Live web search is then switched off, because the page text is already in the prompt.
-2. `process_ai_query` routes the request (see below).
-3. The exchange is stored only when memory is on **and** exam mode is off. For links and media a short note is stored instead of the large prompt.
-4. The function never raises: any failure becomes readable, secret-free text.
+2. `process_ai_query` routes the request (see below). Before the first provider is called it asks the search planner whether the message needs fresh web data and, if so, adds one cached search to the prompt (see *Smart web search*). The router hands the links of the results back through the `web_sources` list.
+3. When web results were used, `run_chat` appends up to three source links under the answer, before the failover note. Exam mode never gets them.
+4. The exchange is stored only when memory is on **and** exam mode is off. For links and media a short note is stored instead of the large prompt, and the stored answer never contains the source links.
+5. The function never raises: any failure becomes readable, secret-free text.
 
 ## Provider routing and failover
 
@@ -50,18 +51,21 @@ sequenceDiagram
     participant A as Adapter
     participant P as Pipeline
     participant R as AI Router
+    participant W as Search planner + Tavily
     participant G as Groq
     participant M as Gemini
 
     U->>A: message
     A->>P: run_chat(session, text)
     P->>R: process_ai_query(...)
-    R->>G: chat completion (no SDK retries)
+    R->>W: needs fresh data? one cached search at most
+    W-->>R: web data + source links
+    R->>G: chat completion with web data (no SDK retries)
     G--xR: 429 or timeout
-    R->>M: same prompt (+ live web context if needed)
+    R->>M: same prompt, same web data (no second search)
     M-->>R: answer
-    R-->>P: answer + failover note
-    P-->>A: reply text
+    R-->>P: answer + failover note + source links
+    P-->>A: reply text (answer, sources, note)
     A-->>U: HTML-safe, chunked message(s)
 ```
 
@@ -71,10 +75,59 @@ Routing rules, all in `services/ai_router.py`:
 - **The user's selected model decides who is tried first.** `/gemini` (or a missing Groq key) means Gemini first; otherwise Groq first.
 - **Any failure replays the same request on the other provider.** That includes HTTP 429, timeouts and *empty* answers. The reply gets a short note saying the other provider answered.
 - **Exam mode suppresses the note**, because the answer-sheet line must stay machine-readable.
-- **Live web context is added only on the Gemini path.**
+- **Live web context reaches whichever provider answers.** It is added to the prompt before the first provider is called, on the Groq-first and the Gemini-first path alike, and the same enriched prompt is replayed on failover, so a request makes at most one search. Exam mode, link-summary prompts, images and PDFs never search.
 - **If both providers fail**, the raised error names both causes (secrets redacted).
 - **Groq fails fast.** When a Gemini key exists the Groq client is built with `max_retries=0`, so failover does not wait for SDK back-off. PDFs use a separate Gemini client with a 180 s timeout instead of 60 s.
 - **Several keys per provider are handled below this layer** (see the next section). To the router a provider call still either succeeds or raises, so everything above is unchanged.
+
+## Smart web search
+
+A keyword list cannot tell "قیمت دلار" from "نظریه‌ی قیمت‌گذاری را توضیح بده", and a follow-up such as "و یورو؟" contains no keyword at all. The decision is therefore made by a small model call, the **search planner** (`services/search_planner.py`), with the old keyword heuristic as its safety net. Everything is wired in `ai_router.with_web_context`.
+
+**The decision, in order.**
+
+| Step | Rule | Model call? |
+| :--- | :--- | :--- |
+| 1. Never | Greetings (also with punctuation or emoji: "سلام!", "hello 👋") and messages shorter than 4 characters | no |
+| 2. Always | Explicit phrases ("سرچ کن", "جستجو کن", "search", ...). A bare "سرچ کن" searches the previous user message of the history | no |
+| 3. Planner | Everything else: one call, strict JSON `{"search": bool, "query": str}` | **one** |
+| 4. Fallback | Planner disabled, failed, timed out, empty or invalid: the keyword heuristic (`should_search_web`) and the cleaned message as the query | no |
+
+The lists behind steps 1 and 2 (`EXPLICIT_SEARCH_PHRASES`, `GREETINGS`) and the heuristic's `FRESHNESS_TRIGGERS` live in `services/web_service.py`.
+
+**The planner call.** The fast Groq model (`MODEL_FAST`; Gemini when Groq is missing, or when the Groq call fails, times out or answers empty), temperature 0, at most 256 tokens, and a per-call timeout of `SEARCH_PLANNER_TIMEOUT_SECONDS` (4 s; for Gemini it is sent as `http_options.timeout`). The prompt is tiny: a short English instruction plus the last `SEARCH_PLANNER_HISTORY_MESSAGES` (4) messages of history, each clipped to 300 characters and flattened to one line (a newline cannot forge a `assistant:` line), plus the latest message. History exists only while memory is on, so follow-ups such as "و یورو؟" are understood only then. Only a *failed call* moves on to Gemini; an answer that is not valid JSON goes straight to the fallback, so the normal case stays a single call.
+
+**Parsing is defensive.** `<think>` blocks and Markdown code fences are stripped, the first valid JSON object is taken even when prose surrounds it, and the types are checked: `search` must be a real boolean (`"true"` and `1` are invalid) and, when it is true, `query` must be a non-empty string (normalised to one line, at most 200 characters). Invalid means the keyword fallback.
+
+**It can never block an answer.** `plan_search` never raises, and `with_web_context` catches anything that still escapes from planning or searching and sends the question on without web data. The worst case of a slow planner is one timeout per provider (and, with several keys, `KEY_MAX_ATTEMPTS` attempts per provider, see *API key rotation*) before the fallback; it is not retried.
+
+**One search per message.** The planner's query goes to `fetch_web_context(query, sources=..., cached=True, clean=False)`: Tavily first, Google News RSS as the keyless fallback. `clean=False` keeps the planner's wording untouched ("python 3.13" stays that way), whereas `/web` still strips filler words as before. The enriched prompt is built once, before the first provider is called, and reused if the request fails over.
+
+**The cache.** `web_service.TTLCache` keeps identical queries (case and spacing do not matter) for `SEARCH_CACHE_TTL_SECONDS` (600 s; `0` switches it off). It is bounded by `SEARCH_CACHE_MAX_ENTRIES` (128, oldest dropped first, expired entries swept on every store), guarded by one lock that is never held during I/O, and takes an injectable clock, so tests never sleep. Empty results are not cached. `/web` and `/testweb` neither read nor write it: they stay live and unchanged.
+
+**Sources.** The Tavily results' links (or the RSS items' links) are collected during the same search: only http(s) links, no duplicates, at most `SEARCH_MAX_SOURCES` (3). `run_chat` appends them as plain text:
+
+```text
+منابع:
+1. https://example.com/a
+2. https://example.org/b
+```
+
+Plain text is deliberate. Telegram escapes the whole answer once (`&` becomes `&amp;` and renders as `&`) and Bale shows text as it is; both make bare links tappable. Characters that `to_telegram_html` would rewrite or that break HTML (spaces, `*`, backticks, `<`, `>`, quotes, non-ASCII) are percent-encoded, so a link can never turn into bold or code. The block sits under the answer and above the failover note, is not stored in memory, and never appears in exam mode. Telegram may show a link preview for the first source.
+
+**Keys and the rate limit.** The planner calls go through the normal Groq and Gemini clients, so key rotation applies to them like to any other call; the search goes through `tavily_pool`. The per-user rate limiter sits in the adapters, once per incoming message: the planner and the search belong to that request and are not counted again.
+
+**Settings** (environment variables, read as `config.NAME` at call time):
+
+| Variable | Default | Meaning |
+| :--- | :---: | :--- |
+| `SEARCH_PLANNER_ENABLED` | `true` | `false` skips the planner: keyword heuristic only (the skip rules still apply) |
+| `SEARCH_PLANNER_TIMEOUT_SECONDS` | `4` | Timeout of one planner call (minimum 0.5; lower values fall back to the default) |
+| `SEARCH_CACHE_TTL_SECONDS` | `600` | How long an identical query is reused; `0` switches the cache off |
+
+`SEARCH_CACHE_MAX_ENTRIES`, `SEARCH_PLANNER_HISTORY_MESSAGES` and `SEARCH_MAX_SOURCES` are plain constants in `config.py`.
+
+**Limits worth knowing.** The keyword path (explicit phrases, fallback) still uses `clean_query_for_search`, which removes every period, so "python 3.13" becomes "python 313" there; the planner's queries bypass it. `پیدا کن` and `search` are in the explicit list, so "find the roots of x² - 4" or a message containing "research" always searches.
 
 ## API key rotation
 
@@ -124,7 +177,7 @@ Each user may spend a limited number of provider calls: `RATE_LIMIT_MAX` AI-cons
 | `/quiz` and the quiz "next question" button | Quiz answers (buttons or typed), `/quiz_stop` |
 | Any unknown command (it goes to the model as text) | `/wiki`, `/arxiv`: they only call the keyless Wikipedia and ArXiv APIs |
 
-One request is one unit even when it reaches two providers (a voice note is Whisper, then chat; `/quiz` retries once on malformed JSON). Typed quiz answers are graded before the check, because grading is local. The tool rule is `QUOTA_FREE_TOOLS` in `core/ratelimit.py`; every other tool counts, so a command added later is limited until it is listed there on purpose.
+One request is one unit even when it reaches two providers (a voice note is Whisper, then chat; `/quiz` retries once on malformed JSON) or makes extra calls on the way: the search planner call and the web search of a chat message are part of that one request. Typed quiz answers are graded before the check, because grading is local. The tool rule is `QUOTA_FREE_TOOLS` in `core/ratelimit.py`; every other tool counts, so a command added later is limited until it is listed there on purpose.
 
 **Algorithm.** A sliding-window log: for each user, the times of their accepted requests. A request is accepted while fewer than `RATE_LIMIT_MAX` of them are younger than the window, and only then is it recorded. So a rejected request never extends a block, a user holds at most `RATE_LIMIT_MAX` timestamps, and no window-long interval ever contains more than the limit (a fixed window would allow twice that across its boundary). Checking and recording are one step under one lock, so concurrent polling threads cannot both take the last slot. `Decision.retry_after` is the number of whole seconds, rounded up and at least 1, until a slot frees up.
 
@@ -165,27 +218,30 @@ The suite uses the standard library only (`unittest`) and runs in well under a s
 - **Stubs fail loudly.** Every network-facing stub method raises `AssertionError`, so a test that forgets to mock a call fails instead of hanging.
 - **Regression tests are named after the bug.** For example `VoiceDurationTests` (Bale reports milliseconds) and `PollingTests` (poisoned updates).
 - **Rate-limit tests never sleep either.** The limiter takes an injectable clock (`RateLimiter(clock=FakeClock())`). One set of scenarios (limit boundary, expiry, notice once per window, what counts and what is free, allow-list first) is written against a small driver interface and runs unchanged on Telegram and on Bale, so identical behaviour is checked, not assumed. The concurrency tests make threads switch inside the critical section, so a missing lock fails the build instead of passing by luck.
+- **Search tests are offline end to end.** `tests/test_smart_search.py` runs the real pipeline, router and planner over scripted Groq and Gemini clients (the planner call is recognised by its system prompt) and a fake `requests`, through the real Telegram and Bale adapters. It checks both provider paths, failover with one search, history-aware prompts, every planner failure, the cache with a fake clock, rendering on both platforms, the exclusions, and that the planner is not an extra request for the rate limiter. The cache clock is injectable like the others.
 - **Rotation tests never sleep.** They patch `key_pool.clock` with `tests.helpers.FakeClock` and advance it by hand, and the integration tests replace `time.sleep` with a function that fails, so any wait inside rotation breaks the build.
 
 | Test file | Tests | Focus |
 | :--- | :---: | :--- |
 | `test_key_pool.py` | 60 | Key parsing and merging, env overrides, error classification, round-robin, cooldowns, bounds, exhaustion, single key, logging, concurrency |
+| `test_web_service.py` | 75 | Search heuristics and skip rules, query building, TTL cache, result sources and their formatting, URL extraction, link prompt budget, `/read` |
 | `test_telegram_handler.py` | 52 | Wiring, panel, reply rendering with plain-text fallback, documents, voice, photos |
 | `test_ratelimit_adapters.py` | 50 | The rate limit on both platforms with the same scenarios: boundary, expiry, notice once per window, isolation, what is counted and what is free, disabled mode, allow-list first |
 | `test_key_rotation.py` | 46 | Rotation at every call site: Groq chat and Whisper, Gemini text/image/PDF, `/arxiv_full`, Tavily; cross-provider failover |
 | `test_ratelimit.py` | 46 | The limiter itself: boundary, sliding window, user and platform isolation, disabled mode, notices, cleanup, concurrency, `RATE_LIMIT_*` settings |
+| `test_search_planner.py` | 41 | Planner prompt and history, defensive JSON parsing, provider order, every fallback, skip rules, key rotation, settings |
 | `test_bale_handler.py` | 41 | Routing, voice duration units, media, transport, polling loop |
-| `test_ai_router.py` | 28 | Failover, multimodal routing, prompt assembly, web enrichment |
-| `test_web_service.py` | 28 | Search heuristics, URL extraction, link prompt budget, `/read` |
+| `test_ai_router.py` | 47 | Failover, multimodal routing, prompt assembly, web enrichment on both provider paths and in failover, exclusions |
+| `test_smart_search.py` | 38 | Planner → search → answer → sources end to end on both messengers, cache, exclusions, rate limit |
 | `test_quiz_and_tools.py` | 20 | Quiz JSON contract and flow, tool registry |
 | `test_knowledge_service.py` | 19 | Wikipedia, ArXiv ids, `/arxiv`, `/arxiv_full` |
 | `test_formatters.py` | 14 | Message splitting, Markdown to Telegram HTML, truncation |
 | `test_media_and_audio.py` | 12 | Image and PDF helpers, transcription |
-| `test_pipeline.py` | 11 | `run_chat`, link handling, memory rule |
+| `test_pipeline.py` | 19 | `run_chat`, link handling, memory rule, source links |
 | `test_session.py` | 10 | `Session`, `SessionStore` |
 | `test_security.py` | 14 | Authorization, redaction (including every rotated key) |
 | `test_entrypoint.py` | 8 | Health server, `main()` wiring, key-count startup log |
-| **Total** | **459** | |
+| **Total** | **612** | |
 
 ## Extending the gateway
 
@@ -201,4 +257,4 @@ The suite uses the standard library only (`unittest`) and runs in well under a s
 
 ## Known trade-offs
 
-Sessions, key cooldowns and rate-limit counters live in memory, Bale updates are handled one at a time, web search is triggered by keyword heuristics, and images and PDFs have no failover. Each has a planned next step in the README's [Trade-offs and Roadmap](../README.md#trade-offs-and-roadmap).
+Sessions, key cooldowns and rate-limit counters live in memory, Bale updates are handled one at a time, and images and PDFs have no failover. Each has a planned next step in the README's [Trade-offs and Roadmap](../README.md#trade-offs-and-roadmap).

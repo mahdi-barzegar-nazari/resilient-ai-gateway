@@ -6,6 +6,7 @@ from unittest import mock
 import config
 from core import ratelimit
 from core.session import sessions
+from services import clients
 from telebot.apihelper import ApiTelegramException
 
 
@@ -146,5 +147,56 @@ def pin_rotation_settings(testcase):
     """Fix the rotation constants so a developer's environment variables cannot change test outcomes."""
     for name, value in ROTATION_DEFAULTS.items():
         patcher = mock.patch.object(config, name, value)
+        patcher.start()
+        testcase.addCleanup(patcher.stop)
+
+
+# ---------------------------------------------------------------- scripted provider clients (search planner, web enrichment)
+class ScriptedProvider:
+    """Records the keyword arguments of every call and plays back ``outcomes`` in order (the last one repeats).
+
+    An outcome is an exception (raised), a callable (called with the request kwargs; its result is the answer) or the text
+    of the answer itself.
+    """
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes) or [""]
+        self.calls = []
+
+    def _answer(self, kwargs):
+        self.calls.append(kwargs)
+        outcome = self.outcomes[min(len(self.calls) - 1, len(self.outcomes) - 1)]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome(kwargs) if callable(outcome) else outcome
+
+
+class FakeGroq(ScriptedProvider):
+    """Stands in for ``clients.groq_client``."""
+
+    def __init__(self, *outcomes):
+        super().__init__(*outcomes)
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        text = self._answer(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+
+
+class FakeGemini(ScriptedProvider):
+    """Stands in for ``clients.gemini_client``."""
+
+    def __init__(self, *outcomes):
+        super().__init__(*outcomes)
+        self.models = SimpleNamespace(generate_content=self._generate)
+
+    def _generate(self, **kwargs):
+        return SimpleNamespace(text=self._answer(kwargs))
+
+
+def install_providers(testcase, groq=None, gemini=None):
+    """Make ``clients`` hold exactly these fake providers (``None`` = key not configured) for one test."""
+    for name, value in (("groq_client", groq), ("gemini_client", gemini), ("gemini_pdf_client", gemini)):
+        patcher = mock.patch.object(clients, name, value)
         patcher.start()
         testcase.addCleanup(patcher.stop)
